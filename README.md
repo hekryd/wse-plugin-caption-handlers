@@ -35,6 +35,66 @@ https://www.wowza.com/testplayers?src=https://wse-demo.wowza.com/whisper/myStrea
 ## Configuration
 See the included Application.xml files for the module configurations.
 
+### Whisper
+To run whisper with GPU and docker compose, uncomment the following lines:
+```
+...
+        # runtime: nvidia
+        # deploy:
+        #   resources:
+        #     reservations:
+        #       devices:
+        #         - driver: nvidia
+        #           capabilities: [gpu]
+        #           count: 1
+...        
+
+            # - USE_GPU=True
+            # - FP16=true
+...
+```
+Update the whisper docker image to use the gpu image:
+```
+    whisper_server:
+        hostname: whisper.server
+        image: wowza/whisper_streaming:latest-gpu
+```
+### Translation
+To run translation and docker compose, uncomment the following lines:
+```
+...
+            # - TRANSLATE_HOST=libretranslate.server
+            # - TRANSLATE_PORT=5000
+
+...
+    # libretranslate_server:
+    #     hostname: libretranslate.server
+    #     image: libretranslate/libretranslate:latest
+    #     # image: libretranslate/libretranslate:latest-cuda 
+    #     environment:
+    #         - LT_LOAD_ONLY=en,fr,es,de,ja
+    #     ports:
+    #         - 5001:5000
+    #     volumes:
+    #         - /tmp/libretranslate_models_cache:/home/libretranslate/.local
+...
+```
+Update the `REPORT_LANGUAGES` environment variable in the Docker Compose file to match what languages you want to translate to.
+```
+            - REPORT_LANGUAGES=en,fr,es,de,ja
+```
+Match those languages with this section in [`whisper/Application.xml`](https://github.com/WowzaMediaSystems/wse-plugin-caption-handlers/blob/main/conf/whisper/Application.xml)
+```
+		<TimedText>
+...
+			<Properties>
+				<Property>
+					<Name>captionLiveIngestLanguages</Name>
+					<Value>en,fr,es,de,ja</Value>
+				</Property>
+			</Properties>
+```
+
 ## More resources
 For full install instructions and to use the compiled version of these modules, see the following articles:
 

@@ -27,8 +27,8 @@ public class AzureCaptionsTranscoderActionListener extends AudioResamplingTransc
     }
 
     @Override
-    public SpeechHandler getSpeechHandler(CaptionHandler captionHandler)
+    public SpeechHandler getSpeechHandler(CaptionHandler captionHandler,String streamName)
     {
-        return new AzureSpeechToTextHandler(appInstance, captionHandler, subscriptionKey, serviceRegion);
+        return new AzureSpeechToTextHandler(appInstance, captionHandler, subscriptionKey, serviceRegion,streamName);
     }
 }

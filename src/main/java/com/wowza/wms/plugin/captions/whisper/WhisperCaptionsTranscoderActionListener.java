@@ -21,8 +21,8 @@ public class WhisperCaptionsTranscoderActionListener extends AudioResamplingTran
     }
 
     @Override
-    public SpeechHandler getSpeechHandler(CaptionHandler captionHandler)
+    public SpeechHandler getSpeechHandler(CaptionHandler captionHandler, String streamName)  // Add streamName parameter
     {
-        return new WhisperSpeechToTextHandler(appInstance, captionHandler);
+        return new WhisperSpeechToTextHandler(appInstance, captionHandler, streamName);  // Pass it along
     }
 }

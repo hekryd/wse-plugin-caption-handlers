@@ -65,7 +65,7 @@ public class WhisperSpeechToTextHandler implements SpeechHandler
 
     private int retryCount = 0;
 
-    public WhisperSpeechToTextHandler(IApplicationInstance appInstance, CaptionHandler captionHandler)
+    public WhisperSpeechToTextHandler(IApplicationInstance appInstance, CaptionHandler captionHandler, String streamName)
     {
         this.appInstance = appInstance;
         this.logger = WMSLoggerFactory.getLoggerObj(appInstance);

@@ -46,7 +46,7 @@ public class AzureSpeechToTextHandler implements SpeechHandler
     private final int firstPassPercentage;
 
     public AzureSpeechToTextHandler(IApplicationInstance appInstance, CaptionHandler captionHandler, String subscriptionKey,
-            String serviceRegion)
+            String serviceRegion, String streamName)
     {
         WMSProperties props = appInstance.getProperties();
         this.logger = WMSLoggerFactory.getLoggerObj(appInstance);
@@ -57,27 +57,25 @@ public class AzureSpeechToTextHandler implements SpeechHandler
         maxLines = props.getPropertyInt(PROP_MAX_CAPTION_LINE_COUNT, 2);
         this.captionHandler = captionHandler;
         
-        String instanceName = appInstance.getName(); // e.g., "01_de_1080p"
-        String[] parts = instanceName.split("_");
+      String instanceName = streamName; // e.g., "01_de_1080p"
+      String[] parts = instanceName.split("_");
 
-        // default to en-US if nothing found
-        String instanceLang = (parts.length > 1) ? parts[1].toLowerCase() : "en";
+      // default to en-US if nothing found
+      String instanceLang = (parts.length > 1) ? parts[1].toLowerCase() : "en";
 
-        Map<String, String> langMap = Map.of(
-            "en", "en-US",
-            "de", "de-DE",
-            "fr", "fr-FR",
-            "es", "es-ES"
-            // add more as needed
-        );
+      // Language mapping - add more as needed
+      Map<String, String> langMap = Map.of(
+          "en", "en-US",
+          "de", "de-DE",
+          "fr", "fr-FR",
+          "es", "es-ES"
+      );
 
-        String bcp47Tag = langMap.getOrDefault(instanceLang, "en-US");
+      String bcp47Tag = langMap.getOrDefault(instanceLang, "en-US");
+      recognitionLanguage = bcp47Tag;  // Direct assignment, no conversion needed
 
-        recognitionLanguage = Locale.forLanguageTag(bcp47Tag).toLanguageTag();
-
-
-        if (!isBCP47WithRegion(recognitionLanguage))
-            throw new RuntimeException("Invalid recognition language: " + recognitionLanguage);
+      if (!isBCP47WithRegion(recognitionLanguage))
+          throw new RuntimeException("Invalid recognition language: " + recognitionLanguage);
 
         String languagesStr = appInstance.getTimedTextProperties().getPropertyStr(PROP_DEFAULT_CAPTION_LANGUAGES, ITimedTextConstants.LANGUAGE_ID_ENGLISH);
         languageMap = Arrays.stream(languagesStr.split(","))

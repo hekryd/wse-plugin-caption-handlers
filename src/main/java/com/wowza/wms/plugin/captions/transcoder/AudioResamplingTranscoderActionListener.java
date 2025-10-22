@@ -74,7 +74,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
                     name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
             CaptionHandler captionHandler = new DelayedStreamCaptionHandler(appInstance, delayedStream);
-            SpeechHandler handler = getSpeechHandler(captionHandler);
+            SpeechHandler handler = getSpeechHandler(captionHandler ,streamName);
             new Thread(handler, AzureSpeechToTextHandler.class.getSimpleName() + "[" + appInstance.getContextStr() + "/" + streamName + "]")
                     .start();
             return handler;
@@ -83,7 +83,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         sessionAudio.addFrameListener(frameListener);
     }
 
-    public abstract SpeechHandler getSpeechHandler(CaptionHandler captionHandler);
+    public abstract SpeechHandler getSpeechHandler(CaptionHandler captionHandler,String streamName);
 
     @Override
     public void onShutdownStart(LiveStreamTranscoder transcoder)

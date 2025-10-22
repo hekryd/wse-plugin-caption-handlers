@@ -25,3 +25,14 @@ wse
 model_cache
 libretranslate_models
 lib
+src/main/java/com/wowza/wms/plugin/captions/.DS_Store
+src/main/java/com/wowza/wms/plugin/.DS_Store
+src/main/java/com/wowza/wms/.DS_Store
+src/main/java/com/wowza/.DS_Store
+src/main/java/com/.DS_Store
+src/main/java/.DS_Store
+src/main/.DS_Store
+src/.DS_Store
+.DS_Store
+.idea/.name
+*.xml

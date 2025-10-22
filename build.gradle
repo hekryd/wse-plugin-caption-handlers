@@ -1,6 +1,8 @@
 import java.text.SimpleDateFormat
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.Date
+
 
 plugins {
     id 'java-library'
@@ -60,6 +62,9 @@ tasks.register('copyLibsForDocker', Copy) {
 jar.configure {
     finalizedBy (copyLibsForDocker)
 }
+tasks.named('compileTestJava') {
+    dependsOn tasks.named('copyLibsForDocker')
+}
 
 tasks.withType(Jar).configureEach {
     manifest {
@@ -80,7 +85,7 @@ tasks.withType(Jar).configureEach {
 }
 
 clean.configure {
-    delete layout.projectDirectory.dir("lib")
+   // delete layout.projectDirectory.dir("lib")
 }
 
 gitProperties {

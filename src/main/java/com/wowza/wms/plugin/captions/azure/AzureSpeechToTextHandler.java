@@ -56,8 +56,26 @@ public class AzureSpeechToTextHandler implements SpeechHandler
         maxLineLength = props.getPropertyInt(PROP_MAX_CAPTION_LINE_LENGTH, CaptionHelper.defaultMaxLineLengthSBCS);
         maxLines = props.getPropertyInt(PROP_MAX_CAPTION_LINE_COUNT, 2);
         this.captionHandler = captionHandler;
-        recognitionLanguage = toLocale(props.getPropertyStr(PROP_RECOGNITION_LANGUAGE, DEFAULT_RECOGNITION_LANGUAGE))
-                .toLanguageTag();
+        
+        String instanceName = appInstance.getName(); // e.g., "01_de_1080p"
+        String[] parts = instanceName.split("_");
+
+        // default to en-US if nothing found
+        String instanceLang = (parts.length > 1) ? parts[1].toLowerCase() : "en";
+
+        Map<String, String> langMap = Map.of(
+            "en", "en-US",
+            "de", "de-DE",
+            "fr", "fr-FR",
+            "es", "es-ES"
+            // add more as needed
+        );
+
+        String bcp47Tag = langMap.getOrDefault(instanceLang, "en-US");
+
+        recognitionLanguage = Locale.forLanguageTag(bcp47Tag).toLanguageTag();
+
+
         if (!isBCP47WithRegion(recognitionLanguage))
             throw new RuntimeException("Invalid recognition language: " + recognitionLanguage);
 

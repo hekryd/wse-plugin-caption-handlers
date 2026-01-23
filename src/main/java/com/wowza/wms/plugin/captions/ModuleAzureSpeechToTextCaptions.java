@@ -19,6 +19,7 @@ import com.wowza.wms.timedtext.model.ITimedTextConstants;
 
 import java.util.*;
 import java.util.concurrent.*;
+import com.wowza.wms.plugin.captions.mongo.Mongo;
 
 public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 {
@@ -49,6 +50,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private String subscriptionKey;
     private String serviceRegion;
     private boolean enabled = false;
+    private Mongo mongo;
 
     public void onAppCreate(IApplicationInstance appInstance)
     {
@@ -69,6 +71,17 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
     public void onAppStart(IApplicationInstance appInstance)
     {
+        logger.error(MODULE_NAME + ".onAppStart initializing MongoDB connection");
+        mongo = new Mongo("Events_test");
+        if (mongo == null)
+            logger.error(MODULE_NAME + ".onAppStart could not initialize MongoDB connection");
+        mongo.connect();
+         logger.error(MODULE_NAME + ".onAppStart MongoDB connection initialized");
+
+         // log a test query to verify connection
+        List<String> collections = mongo.getDatabase().listCollectionNames().into(new ArrayList<>());
+        logger.error(MODULE_NAME + ".onAppStart MongoDB collections: " + collections.toString());
+
         if (!enabled)
             return;
         try

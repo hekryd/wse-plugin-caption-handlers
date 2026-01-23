@@ -10,8 +10,11 @@ import com.wowza.wms.amf.*;
 import com.wowza.wms.application.IApplicationInstance;
 import com.wowza.wms.logging.*;
 import com.wowza.wms.vhost.IVHost;
+import com.wowza.wms.plugin.captions.mongo.Mongo;
+import org.bson.Document;
 
 import java.time.*;
+import java.util.Date;
 
 import static com.wowza.wms.plugin.captions.ModuleCaptionsBase.PROP_CAPTIONS_DEBUG_LOG;
 import static com.wowza.wms.plugin.captions.caption.CaptionHelper.dotNetEpoch;
@@ -24,14 +27,18 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private final DelayedStream delayedStream;
     private final WMSLogger logger;
     private final boolean debugLog;
+    private final Mongo mongo;
+    private final String streamName;
 
     private int wordsPerMinute = DEFAULT_WORDS_PER_MINUTE;
 
-    public DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream)
+    public DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo)
     {
         this.delayedStream = delayedStream;
         logger = WMSLoggerFactory.getLoggerObj(DelayedStreamCaptionHandler.class, appInstance);
         debugLog = appInstance.getProperties().getPropertyBoolean(PROP_CAPTIONS_DEBUG_LOG, false);
+        this.streamName = streamName;
+        this.mongo = mongo;
     }
 
     @Override
@@ -58,6 +65,24 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         if (debugLog)
             logger.info(CLASS_NAME + ".handleCaption: packet = " + packet);
         delayedStream.writePacket(packet);
+
+        // persist caption to Mongo (if available)
+        if (mongo != null && mongo.getDatabase() != null) {
+            try {
+                Document doc = new Document()
+                        .append("stream", streamName)
+                        .append("language", caption.getLanguage())
+                        .append("text", caption.getText())
+                        .append("trackId", caption.getTrackId())
+                        .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
+                        .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
+                        .append("createdAt", new Date());
+                mongo.getDatabase().getCollection("caption").insertOne(doc);
+                logger.info(CLASS_NAME + ".handleCaption: persisted caption to Mongo for stream " + streamName);
+            } catch (Exception e) {
+                logger.error(CLASS_NAME + ".handleCaption: failed to persist caption: " + e.getMessage(), e);
+            }
+        }
     }
 
     @Override

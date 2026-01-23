@@ -19,6 +19,7 @@ import com.wowza.wms.timedtext.model.ITimedTextConstants;
 
 import java.util.*;
 import java.util.concurrent.*;
+import org.bson.Document;
 import com.wowza.wms.plugin.captions.mongo.Mongo;
 
 public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
@@ -51,6 +52,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private String serviceRegion;
     private boolean enabled = false;
     private Mongo mongo;
+    private String customer;
 
     public void onAppCreate(IApplicationInstance appInstance)
     {
@@ -72,7 +74,9 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     public void onAppStart(IApplicationInstance appInstance)
     {
         logger.error(MODULE_NAME + ".onAppStart initializing MongoDB connection");
-        mongo = new Mongo("Events_test");
+        customer = appInstance.getApplication().getName().split("_")[0];
+
+        mongo = new Mongo("Events_" + customer);
         if (mongo == null)
             logger.error(MODULE_NAME + ".onAppStart could not initialize MongoDB connection");
         mongo.connect();
@@ -81,14 +85,24 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
          // log a test query to verify connection
         List<String> collections = mongo.getDatabase().listCollectionNames().into(new ArrayList<>());
         logger.error(MODULE_NAME + ".onAppStart MongoDB collections: " + collections.toString());
+        //reverse the collections list
+        collections.sort(Comparator.reverseOrder());
+        //go in every collection in the list in asc order and get the document with the _id "event_config" and check if phase is "live" if found stop and log the event name
+        for (String collectionName : collections) {
+            Document eventConfig = mongo.getDatabase().getCollection(collectionName).find(new Document("_id", "event_config")).first();
+            if (eventConfig != null && "live".equals(eventConfig.getString("phase"))) {
+                logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
+                break;
+            }
+        }
 
         if (!enabled)
             return;
         try
         {
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
-            appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
-                    subscriptionKey, serviceRegion)));
+                appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
+                    subscriptionKey, serviceRegion, mongo)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }

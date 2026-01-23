@@ -51,7 +51,7 @@ public class ModuleWhisperCaptions extends ModuleCaptionsBase
         try
         {
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
-            appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new WhisperCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams)));
+            appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new WhisperCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams, null)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }

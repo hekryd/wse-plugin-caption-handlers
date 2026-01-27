@@ -15,9 +15,9 @@ import java.util.Map;
 
 public class WhisperCaptionsTranscoderActionListener extends AudioResamplingTranscoderActionListener
 {
-    public WhisperCaptionsTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> speechHandlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo)
+    public WhisperCaptionsTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> speechHandlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection)
     {
-        super(appInstance, speechHandlers, delayedStreams, mongo);
+        super(appInstance, speechHandlers, delayedStreams, mongo, eventCollection);
     }
 
     @Override

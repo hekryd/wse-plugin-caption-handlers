@@ -51,6 +51,17 @@ public class DelayedStream
         executor.scheduleAtFixedRate(() -> processPackets(), 0, 75, TimeUnit.MILLISECONDS);
     }
 
+    public interface PublishListener {
+        void onDataPublished(long absTimecode, com.wowza.wms.amf.AMFPacket packet);
+    }
+
+    private PublishListener publishListener;
+
+    public void setPublishListener(PublishListener listener)
+    {
+        this.publishListener = listener;
+    }
+
     public long getStartOffset()
     {
         return startOffset;
@@ -177,6 +188,13 @@ public class DelayedStream
                         if (debugLog)
                             logger.info(MODULE_NAME + "::" + CLASS_NAME + ".writePacket live: dat:" + timecode + ":" + packet.getSeq());
                         publisher.addDataData(packet.getData(), packet.getSize(), timecode);
+                        if (publishListener != null) {
+                            try {
+                                publishListener.onDataPublished(timecode, packet);
+                            } catch (Exception e) {
+                                logger.error(MODULE_NAME + "::" + CLASS_NAME + ".publishListener error", e);
+                            }
+                        }
                         break;
                 }
                 packets.remove(packet);
@@ -206,6 +224,14 @@ public class DelayedStream
     public long getStartTime()
     {
         return startTime;
+    }
+
+    public long getPublishedStreamTimecode()
+    {
+        if (startOffset == -1)
+            return -1L;
+        long now = System.currentTimeMillis();
+        return now - startDelay - (startTime - startOffset);
     }
 
     public long getFirstPacketTimecode()

@@ -53,6 +53,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private boolean enabled = false;
     private Mongo mongo;
     private String customer;
+    private String liveEventCollection;
 
     public void onAppCreate(IApplicationInstance appInstance)
     {
@@ -92,6 +93,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
             Document eventConfig = mongo.getDatabase().getCollection(collectionName).find(new Document("_id", "event_config")).first();
             if (eventConfig != null && "live".equals(eventConfig.getString("phase"))) {
                 logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
+                liveEventCollection = collectionName;
                 break;
             }
         }
@@ -102,7 +104,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         {
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
                 appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
-                    subscriptionKey, serviceRegion, mongo)));
+                    subscriptionKey, serviceRegion, mongo, liveEventCollection)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }

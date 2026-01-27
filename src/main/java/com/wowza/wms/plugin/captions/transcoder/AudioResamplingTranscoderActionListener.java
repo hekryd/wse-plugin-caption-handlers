@@ -32,6 +32,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
     private final Map<String, SpeechHandler> handlers;
     private final Map<String, DelayedStream> delayedStreams;
     private final com.wowza.wms.plugin.captions.mongo.Mongo mongo;
+    private final String eventCollection;
 
     private static final Path resampleTemplate;
 
@@ -48,12 +49,13 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         }
     }
 
-    public AudioResamplingTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo)
+    public AudioResamplingTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection)
     {
         this.appInstance = appInstance;
         this.handlers = handlers;
         this.delayedStreams = delayedStreams;
         this.mongo = mongo;
+        this.eventCollection = eventCollection;
     }
 
     @Override
@@ -75,7 +77,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         SpeechHandler speechHandler = handlers.computeIfAbsent(mappedName, k -> {
             DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
                     name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
-            CaptionHandler captionHandler = new DelayedStreamCaptionHandler(appInstance, delayedStream, mappedName, mongo);
+            CaptionHandler captionHandler = new DelayedStreamCaptionHandler(appInstance, delayedStream, mappedName, mongo, eventCollection);
             SpeechHandler handler = getSpeechHandler(captionHandler ,streamName);
             new Thread(handler, AzureSpeechToTextHandler.class.getSimpleName() + "[" + appInstance.getContextStr() + "/" + streamName + "]")
                     .start();

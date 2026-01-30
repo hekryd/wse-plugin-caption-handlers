@@ -43,6 +43,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private final Mongo mongo;
     private final String streamName;
     private final String eventCollectionName;
+    private boolean isMainStream = false;
 
     private int wordsPerMinute = DEFAULT_WORDS_PER_MINUTE;
     private final ExecutorService watcherExecutor;
@@ -59,6 +60,55 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         this.mongo = mongo;
         this.eventCollectionName = eventCollectionName;
         this.watcherExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "CaptionChangeWatcher-" + streamName));
+
+        // attempt to detect whether this delayed stream corresponds to the main stream
+        try {
+            String streamLanguage = null;
+            try {
+                if (streamName != null) {
+                    String[] parts = streamName.split("_");
+                    if (parts.length > 1)
+                        streamLanguage = parts[1];
+                }
+            } catch (Exception ignored) {
+            }
+
+            if (this.mongo != null && this.mongo.getDatabase() != null) {
+                try {
+                    String eventColl = this.eventCollectionName != null ? this.eventCollectionName : resolveEventCollectionForStream();
+                    Document languageConfig = this.mongo.getDatabase().getCollection(eventColl).find(new Document("_id", "language_config")).first();
+                    if (languageConfig != null) {
+                        String detectedLanguageKey = null;
+                        try {
+                            if (languageConfig.containsKey("lang")) {
+                                Object langObj = languageConfig.get("lang");
+                                if (langObj instanceof java.util.List) {
+                                    java.util.List<?> list = (java.util.List<?>) langObj;
+                                    if (!list.isEmpty()) {
+                                        Object first = list.get(0);
+                                        if (first instanceof org.bson.Document) {
+                                            detectedLanguageKey = ((org.bson.Document) first).getString("language_key");
+                                        } else if (first instanceof java.util.Map) {
+                                            Object k = ((java.util.Map<?, ?>) first).get("language_key");
+                                            if (k != null)
+                                                detectedLanguageKey = k.toString();
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            logger.error(CLASS_NAME + ".onInit: languageConfig parsing error", e);
+                        }
+                        this.isMainStream = (detectedLanguageKey != null && streamLanguage != null && streamLanguage.equals(detectedLanguageKey));
+                            logger.error(CLASS_NAME + ".init: firstLanguageKey=" + detectedLanguageKey + " mainStream=" + this.isMainStream);
+                    }
+                } catch (Exception e) {
+                    logger.error(CLASS_NAME + ".onInit: language detection failed: " + e.getMessage(), e);
+                }
+            }
+        } catch (Exception e) {
+            logger.error(CLASS_NAME + ".init: error detecting main stream: " + e.getMessage(), e);
+        }
 
         // start watcher if mongo is available
         if (this.mongo != null && this.mongo.getDatabase() != null) {
@@ -123,8 +173,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         delayedStream.writePacket(packet);
 
         // persist caption to Mongo (if available)
-        if (mongo != null && mongo.getClient() != null) {
+        if (mongo != null && mongo.getClient() != null && isMainStream) {
             try {
+                logger.info("mainStram found. Persisting caption to Mongo DB");
                 // determine customer from the connected Events_<customer> database name
                 String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
                 String customer = null;

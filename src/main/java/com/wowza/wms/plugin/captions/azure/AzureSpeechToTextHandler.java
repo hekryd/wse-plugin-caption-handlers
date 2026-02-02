@@ -68,7 +68,6 @@ public class AzureSpeechToTextHandler implements SpeechHandler
           "en", "en-US",
           "de", "de-DE",
           "fr", "fr-FR",
-          "nl", "nl-NL",
           "es", "es-ES"
       );
 

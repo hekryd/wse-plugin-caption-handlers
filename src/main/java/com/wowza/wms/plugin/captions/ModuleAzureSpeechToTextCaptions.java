@@ -50,19 +50,15 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private DelayedStreamListener delayedStreamListener;
     private String subscriptionKey;
     private String serviceRegion;
+    private boolean enabled = false;
     private Mongo mongo;
     private String customer;
     private String liveEventCollection;
 
-    //event_config
-    private boolean enabled = false;
-    private int added_stream_delay_in_ms = 30;
-    //private List<String> enabled_languages = Arrays.asList();
-
     public void onAppCreate(IApplicationInstance appInstance)
     {
         super.onAppCreate(appInstance);
-        //enabled = appInstance.getProperties().getPropertyBoolean(PROP_CAPTIONS_ENABLED, enabled);
+        enabled = appInstance.getProperties().getPropertyBoolean(PROP_CAPTIONS_ENABLED, enabled);
         try
         {
             subscriptionKey = Objects.requireNonNull(appInstance.getProperties().getPropertyStr(PROP_SUBSCRIPTION_KEY), "Azure Speech Subscription Key not set");
@@ -98,19 +94,6 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
             if (eventConfig != null && "live".equals(eventConfig.getString("phase"))) {
                 logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
                 liveEventCollection = collectionName;
-                Document captionConfig = eventConfig.get("caption_config", Document.class);
-                if (captionConfig != null) {
-                    enabled = captionConfig.getBoolean("enabled", enabled);
-                    added_stream_delay_in_ms = captionConfig.getInteger("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                    appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                    logger.info(MODULE_NAME + ".onAppStart set added_stream_delay_in_ms property: " + added_stream_delay_in_ms);
-                    /* 
-                    enabled_languages = captionConfig.getList("enabled_captions", String.class);
-                    if (enabled_languages == null) {
-                        enabled_languages = Arrays.asList();
-                    }  
-                    */
-                }
                 break;
             }
         }

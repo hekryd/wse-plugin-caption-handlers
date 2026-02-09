@@ -189,11 +189,13 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 String captionsDbName = customer != null ? "Captions_" + customer : mongo.getDatabase().getName();
                 // resolve event collection name (event id) from Events_<customer> or use provided one
                 String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
+                // Store video timecode (captionOffset) for syncing across all streams
                 Document doc = new Document()
                         .append("stream", streamName)
                         .append("language", caption.getLanguage())
                         .append("text", caption.getText())
                         .append("trackId", caption.getTrackId())
+                        .append("videoTimecode", captionOffset)
                         .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
                         .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
                         .append("createdAt", new Date());
@@ -259,6 +261,17 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         ChangeStreamDocument<Document> change = cursor.next();
                         if (change == null)
                             continue;
+                        
+                        // Main stream: skip inserts (own captions), only react to updates
+                        // Non-main streams: react to both inserts and updates
+                        
+                        String operationType = change.getOperationType() != null ? change.getOperationType().getValue() : null;
+                        if (isMainStream && "insert".equals(operationType)) {
+                            if (debugLog)
+                                logger.info(CLASS_NAME + ".changeWatcher: mainStream skipping own insert for stream " + streamName);
+                            continue;
+                        }
+                        
                         Document full = change.getFullDocument();
                         if (full == null)
                             continue;
@@ -273,13 +286,20 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                             String language = full.getString("language");
                             String text = full.getString("text");
                             int trackId = full.containsKey("trackId") ? full.getInteger("trackId", 99) : 99;
-                            Date dStart = full.getDate("startTime");
-                            if (dStart == null) {
-                                if (debugLog)
-                                    logger.warn(CLASS_NAME + ".changeWatcher: document missing startTime: " + full.toJson());
-                                continue;
+                            
+                            // Use videoTimecode for sync across all streams (regardless of stream start time)
+                            Long videoTimecode = full.getLong("videoTimecode");
+                            if (videoTimecode == null) {
+                                // Fallback to startTime for backwards compatibility
+                                Date dStart = full.getDate("startTime");
+                                if (dStart == null) {
+                                    if (debugLog)
+                                        logger.warn(CLASS_NAME + ".changeWatcher: document missing videoTimecode and startTime: " + full.toJson());
+                                    continue;
+                                }
+                                videoTimecode = Duration.between(dotNetEpoch, dStart.toInstant()).toMillis();
                             }
-                            long captionBegin = Duration.between(dotNetEpoch, dStart.toInstant()).toMillis();
+                            long captionBegin = videoTimecode;
 
                             long startOffset = delayedStream.getStartOffset();
                             if (startOffset == -1) {
@@ -289,8 +309,10 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                             }
 
                             // if this caption already showed in the live stream, mark it as shown in DB and skip
+                            // Compare video timecode with relative stream timecode (publishedThreshold - startOffset)
                             long publishedThreshold = delayedStream.getPublishedStreamTimecode();
-                            boolean alreadyShownInStream = (publishedThreshold != -1 && captionBegin <= publishedThreshold);
+                            long relativePublishedTime = publishedThreshold != -1 ? (publishedThreshold - startOffset) : -1;
+                            boolean alreadyShownInStream = (relativePublishedTime != -1 && captionBegin <= relativePublishedTime);
                             if (alreadyShownInStream) {
                                 boolean alreadyMarked = full.getBoolean("shown", false);
                                 if (!alreadyMarked) {

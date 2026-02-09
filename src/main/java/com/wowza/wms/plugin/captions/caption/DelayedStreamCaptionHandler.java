@@ -152,7 +152,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     {
         if (debugLog)
             logger.info(CLASS_NAME + ".handleCaption: caption = " + caption);
-        if (delayedStream == null)
+        if (delayedStream == null && !this.isMainStream)
             return;
         AMFDataObj amfData = new AMFDataObj();
         amfData.put("text", new AMFDataItem(caption.getText()));
@@ -265,9 +265,10 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         try {
                             // incoming caption doc is stored per-event (collection==event id) so no stream filter needed
                             // keep a defensive check in case doc contains stream field
-                            String docStream = full.getString("stream");
-                            if (docStream != null && !docStream.equals(this.streamName))
-                                continue;
+                    
+                           // String docStream = full.getString("stream");
+                            //if (docStream != null && !docStream.equals(this.streamName))
+                            //    continue;
                             // Map document to caption-like payload and send into delayed stream
                             String language = full.getString("language");
                             String text = full.getString("text");

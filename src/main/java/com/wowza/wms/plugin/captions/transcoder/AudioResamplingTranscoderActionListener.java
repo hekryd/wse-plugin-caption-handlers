@@ -73,18 +73,91 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         if (streamName.endsWith(DELAYED_STREAM_SUFFIX))
             return;
         String mappedName  = streamName.replace(".stream", "");
+        
+        // Check if this is the main stream based on language detection
+        boolean isMainStream = isMainStream(mappedName);
+        
         TranscoderSessionAudio sessionAudio = transcoder.getTranscodingSession().getSessionAudio();
         SpeechHandler speechHandler = handlers.computeIfAbsent(mappedName, k -> {
             DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
                     name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
             CaptionHandler captionHandler = new DelayedStreamCaptionHandler(appInstance, delayedStream, mappedName, mongo, eventCollection);
+            
+            // Only create speech handler for main stream
+            if (!isMainStream) {
+                return null; // Non-main streams don't process audio
+            }
+            
             SpeechHandler handler = getSpeechHandler(captionHandler ,streamName);
             new Thread(handler, AzureSpeechToTextHandler.class.getSimpleName() + "[" + appInstance.getContextStr() + "/" + streamName + "]")
                     .start();
             return handler;
         });
-        TranscoderAudioFrameListener frameListener = new TranscoderAudioFrameListener(speechHandler);
-        sessionAudio.addFrameListener(frameListener);
+        
+        // Only add frame listener if we have a speech handler (main stream only)
+        if (speechHandler != null) {
+            TranscoderAudioFrameListener frameListener = new TranscoderAudioFrameListener(speechHandler);
+            sessionAudio.addFrameListener(frameListener);
+        }
+    }
+    
+    private boolean isMainStream(String streamName) {
+        if (mongo == null || mongo.getDatabase() == null)
+            return true; // Default to true if no mongo connection
+            
+        try {
+            String streamLanguage = null;
+            if (streamName != null) {
+                String[] parts = streamName.split("_");
+                if (parts.length > 1)
+                    streamLanguage = parts[1];
+            }
+            
+            if (streamLanguage == null)
+                return true; // Default to true if can't parse language
+            
+            String eventColl = eventCollection;
+            if (eventColl == null) {
+                // Try to find event collection that contains this stream
+                for (String collName : mongo.getDatabase().listCollectionNames()) {
+                    try {
+                        org.bson.Document eventConfig = mongo.getDatabase().getCollection(collName)
+                            .find(new org.bson.Document("_id", "event_config")).first();
+                        if (eventConfig != null && eventConfig.toJson().contains(streamName)) {
+                            eventColl = collName;
+                            break;
+                        }
+                    } catch (Exception ignore) {}
+                }
+            }
+            
+            if (eventColl != null) {
+                org.bson.Document languageConfig = mongo.getDatabase().getCollection(eventColl)
+                    .find(new org.bson.Document("_id", "language_config")).first();
+                if (languageConfig != null && languageConfig.containsKey("lang")) {
+                    Object langObj = languageConfig.get("lang");
+                    if (langObj instanceof java.util.List) {
+                        java.util.List<?> list = (java.util.List<?>) langObj;
+                        if (!list.isEmpty()) {
+                            Object first = list.get(0);
+                            String detectedLanguageKey = null;
+                            if (first instanceof org.bson.Document) {
+                                detectedLanguageKey = ((org.bson.Document) first).getString("language_key");
+                            } else if (first instanceof java.util.Map) {
+                                Object k = ((java.util.Map<?, ?>) first).get("language_key");
+                                if (k != null)
+                                    detectedLanguageKey = k.toString();
+                            }
+                            return streamLanguage.equals(detectedLanguageKey);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Log error but default to true to not break existing functionality
+        }
+        
+        return true; // Default to true if detection fails
     }
 
     public abstract SpeechHandler getSpeechHandler(CaptionHandler captionHandler,String streamName);

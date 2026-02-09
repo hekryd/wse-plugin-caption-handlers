@@ -134,9 +134,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
                     if (captionsDbName != null && eventCollection != null) {
                         mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
-                                .updateOne(new Document("_id", id), new Document("$set", new Document("shown", true).append("shownAt", new Date())));
+                                .updateOne(new Document("_id", id), new Document("$set", new Document("published", true).append("publishedAt", new Date())));
                         if (debugLog)
-                            logger.info(CLASS_NAME + ".publishListener: marked shown for id=" + id + " db=" + captionsDbName + " coll=" + eventCollection);
+                            logger.info(CLASS_NAME + ".publishListener: marked published for id=" + id + " db=" + captionsDbName + " coll=" + eventCollection);
                     }
                 } catch (Exception e) {
                     logger.error(CLASS_NAME + ".publishListener: error marking shown: " + e.getMessage(), e);
@@ -191,13 +191,14 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
                 // Store video timecode (captionOffset) for syncing across all streams
                 Document doc = new Document()
-                        .append("stream", streamName)
+                        .append("mainStream", streamName)
                         .append("language", caption.getLanguage())
                         .append("text", caption.getText())
                         .append("trackId", caption.getTrackId())
                         .append("videoTimecode", captionOffset)
                         .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
                         .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
+                        .append("publishTime", Date.from(CaptionHelper.epochInstantFromMillis(startOffset + captionOffset)))
                         .append("createdAt", new Date());
                 InsertOneResult res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection).insertOne(doc);
                 if (res != null && res.getInsertedId() != null) {
@@ -314,13 +315,13 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                             long relativePublishedTime = publishedThreshold != -1 ? (publishedThreshold - startOffset) : -1;
                             boolean alreadyShownInStream = (relativePublishedTime != -1 && captionBegin <= relativePublishedTime);
                             if (alreadyShownInStream) {
-                                boolean alreadyMarked = full.getBoolean("shown", false);
+                                boolean alreadyMarked = full.getBoolean("published", false);
                                 if (!alreadyMarked) {
                                     try {
                                         coll.updateOne(new Document("_id", full.getObjectId("_id")),
-                                            new Document("$set", new Document("shown", true).append("shownAt", new Date())));
+                                            new Document("$set", new Document("published", true).append("publishedAt", new Date())));
                                         if (debugLog)
-                                            logger.info(CLASS_NAME + ".changeWatcher: marked caption as shown in DB for stream " + streamName + " id=" + full.getObjectId("_id"));
+                                            logger.info(CLASS_NAME + ".changeWatcher: marked caption as published in DB for stream " + streamName + " id=" + full.getObjectId("_id"));
                                     } catch (Exception e) {
                                         logger.error(CLASS_NAME + ".changeWatcher: failed to mark shown in DB: " + e.getMessage(), e);
                                     }

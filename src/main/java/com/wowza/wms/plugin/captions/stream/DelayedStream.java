@@ -22,7 +22,7 @@ public class DelayedStream
 {
     private static final Class<DelayedStream> CLASS = DelayedStream.class;
     private static final String CLASS_NAME = CLASS.getSimpleName();
-    public static final long DEFAULT_START_DELAY = 30000;
+    public static long DEFAULT_START_DELAY = 30000;
     private final IApplicationInstance appInstance;
     private final WMSLogger logger;
     private final String streamName;
@@ -46,8 +46,12 @@ public class DelayedStream
         this.debugLog = appInstance.getProperties().getPropertyBoolean(PROP_DELAYED_STREAM_DEBUG_LOG, debugLog);
         this.streamName = streamName;
         this.executor = executor;
+        // Prüfe, ob die Property 'added_stream_delay_in_ms' gesetzt ist
+        long delayInMs = appInstance.getProperties().getPropertyLong("added_stream_delay_in_ms", -1L);
+        logger.info(MODULE_NAME + "::" + CLASS_NAME + " [Init] added_stream_delay_in_ms=" + delayInMs);
         startTime = System.currentTimeMillis();
         startDelay = appInstance.getProperties().getPropertyLong(PROP_CAPTIONS_STREAM_DELAY, DEFAULT_START_DELAY);
+        logger.info(MODULE_NAME + "::" + CLASS_NAME + " [Init] startDelay=" + startDelay + " ms");
         executor.scheduleAtFixedRate(() -> processPackets(), 0, 75, TimeUnit.MILLISECONDS);
     }
 

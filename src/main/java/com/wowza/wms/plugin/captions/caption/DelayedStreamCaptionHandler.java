@@ -169,7 +169,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
         packet.setAbsTimecode(startOffset + captionOffset);
         if (debugLog)
-            logger.info(CLASS_NAME + ".handleCaption: packet = " + packet);
+            logger.info(CLASS_NAME + ".handleCaption: packet = " + packet + ", stream buffer: " + delayedStream.getFirstPacketTimecode() + " - " + delayedStream.getLastPacketTimecode());
         delayedStream.writePacket(packet);
 
         // persist caption to Mongo (if available)
@@ -262,24 +262,24 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         ChangeStreamDocument<Document> change = cursor.next();
                         if (change == null)
                             continue;
-                        
+
                         // Main stream: skip inserts (own captions), only react to updates
                         // Non-main streams: react to both inserts and updates
-                        
+
                         String operationType = change.getOperationType() != null ? change.getOperationType().getValue() : null;
                         if (isMainStream && "insert".equals(operationType)) {
                             if (debugLog)
                                 logger.info(CLASS_NAME + ".changeWatcher: mainStream skipping own insert for stream " + streamName);
                             continue;
                         }
-                        
+
                         Document full = change.getFullDocument();
                         if (full == null)
                             continue;
                         try {
                             // incoming caption doc is stored per-event (collection==event id) so no stream filter needed
                             // keep a defensive check in case doc contains stream field
-                    
+
                            // String docStream = full.getString("stream");
                             //if (docStream != null && !docStream.equals(this.streamName))
                             //    continue;
@@ -287,7 +287,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                             String language = full.getString("language");
                             String text = full.getString("text");
                             int trackId = full.containsKey("trackId") ? full.getInteger("trackId", 99) : 99;
-                            
+
                             // Use videoTimecode for sync across all streams (regardless of stream start time)
                             Long videoTimecode = full.getLong("videoTimecode");
                             if (videoTimecode == null) {
@@ -413,5 +413,17 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         // fallback to using streamName as collection
         streamToEventCollection.put(streamName, streamName);
         return streamName;
+    }
+
+    @Override
+    public long getStartOffset()
+    {
+        return delayedStream.getStartOffset();
+    }
+
+    @Override
+    public String getStreamName()
+    {
+        return delayedStream.getStreamName();
     }
 }

@@ -5,6 +5,7 @@
 
 package com.wowza.wms.plugin.captions.transcoder;
 
+import com.wowza.wms.logging.WMSLoggerFactory;
 import com.wowza.wms.plugin.captions.audio.SpeechHandler;
 import com.wowza.wms.plugin.captions.azure.AzureSpeechToTextHandler;
 import com.wowza.wms.plugin.captions.caption.CaptionHandler;
@@ -73,38 +74,47 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         if (streamName.endsWith(DELAYED_STREAM_SUFFIX))
             return;
         String mappedName  = streamName.replace(".stream", "");
-        
+
         // Check if this is the main stream based on language detection
         boolean isMainStream = isMainStream(mappedName);
-        
+
         TranscoderSessionAudio sessionAudio = transcoder.getTranscodingSession().getSessionAudio();
         SpeechHandler speechHandler = handlers.computeIfAbsent(mappedName, k -> {
-            DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
-                    name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
-            CaptionHandler captionHandler = new DelayedStreamCaptionHandler(appInstance, delayedStream, mappedName, mongo, eventCollection);
-            
+            try
+            {
+                DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
+                        name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
+                CaptionHandler captionHandler = new DelayedStreamCaptionHandler(appInstance, delayedStream, mappedName, mongo, eventCollection);
+
             // Only create speech handler for main stream
             if (!isMainStream) {
                 return null; // Non-main streams don't process audio
             }
-            
-            SpeechHandler handler = getSpeechHandler(captionHandler ,streamName);
-            new Thread(handler, AzureSpeechToTextHandler.class.getSimpleName() + "[" + appInstance.getContextStr() + "/" + streamName + "]")
-                    .start();
-            return handler;
+
+                SpeechHandler handler = getSpeechHandler(captionHandler ,streamName);
+                new Thread(handler, handler.getClass().getSimpleName() + "[" + appInstance.getContextStr() + "/" + streamName + "]")
+                        .start();
+                return handler;
+            }
+            catch (IOException e)
+            {
+                WMSLoggerFactory.getLoggerObj(AudioResamplingTranscoderActionListener.class, appInstance)
+                        .error("AudioResamplingTranscoderActionListener.onInitStop: Failed to create SpeechHandler for stream " + streamName, e);
+                return null;
+            }
         });
-        
+
         // Only add frame listener if we have a speech handler (main stream only)
         if (speechHandler != null) {
             TranscoderAudioFrameListener frameListener = new TranscoderAudioFrameListener(speechHandler);
             sessionAudio.addFrameListener(frameListener);
         }
     }
-    
+
     private boolean isMainStream(String streamName) {
         if (mongo == null || mongo.getDatabase() == null)
             return true; // Default to true if no mongo connection
-            
+
         try {
             String streamLanguage = null;
             if (streamName != null) {
@@ -112,10 +122,10 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
                 if (parts.length > 1)
                     streamLanguage = parts[1];
             }
-            
+
             if (streamLanguage == null)
                 return true; // Default to true if can't parse language
-            
+
             String eventColl = eventCollection;
             if (eventColl == null) {
                 // Try to find event collection that contains this stream
@@ -130,7 +140,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
                     } catch (Exception ignore) {}
                 }
             }
-            
+
             if (eventColl != null) {
                 org.bson.Document languageConfig = mongo.getDatabase().getCollection(eventColl)
                     .find(new org.bson.Document("_id", "language_config")).first();
@@ -156,11 +166,11 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         } catch (Exception e) {
             // Log error but default to true to not break existing functionality
         }
-        
+
         return true; // Default to true if detection fails
     }
 
-    public abstract SpeechHandler getSpeechHandler(CaptionHandler captionHandler,String streamName);
+    public abstract SpeechHandler getSpeechHandler(CaptionHandler captionHandler,String streamName) throws IOException;
 
     @Override
     public void onShutdownStart(LiveStreamTranscoder transcoder)

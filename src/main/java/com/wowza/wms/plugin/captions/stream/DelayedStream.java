@@ -251,4 +251,9 @@ public class DelayedStream
                 .reduce((prev, next) -> next)
                 .map(AMFPacket::getAbsTimecode).orElse(-1L);
     }
+
+    public String getStreamName()
+    {
+        return streamName;
+    }
 }

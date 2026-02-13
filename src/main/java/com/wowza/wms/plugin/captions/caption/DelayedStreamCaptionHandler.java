@@ -147,74 +147,76 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         }
     }
 
-    @Override
-    public void handleCaption(Caption caption)
-    {
-        if (debugLog)
-            logger.info(CLASS_NAME + ".handleCaption: caption = " + caption);
-        if (delayedStream == null && !this.isMainStream)
-            return;
-        AMFDataObj amfData = new AMFDataObj();
-        amfData.put("text", new AMFDataItem(caption.getText()));
-        amfData.put("language", new AMFDataItem(caption.getLanguage()));
-        amfData.put("trackid", new AMFDataItem(caption.getTrackId()));
+@Override
+public void handleCaption(Caption caption)
+{
+    if (debugLog)
+        logger.info(CLASS_NAME + ".handleCaption: caption = " + caption);
+    if (delayedStream == null && !this.isMainStream)
+        return;
+    AMFDataObj amfData = new AMFDataObj();
+    amfData.put("text", new AMFDataItem(caption.getText()));
+    amfData.put("language", new AMFDataItem(caption.getLanguage()));
+    amfData.put("trackid", new AMFDataItem(caption.getTrackId()));
 
-        AMFDataList dataList = new AMFDataList();
-        dataList.add(new AMFDataItem("onTextData"));
-        dataList.add(amfData);
-        byte[] data = dataList.serialize();
+    AMFDataList dataList = new AMFDataList();
+    dataList.add(new AMFDataItem("onTextData"));
+    dataList.add(amfData);
+    byte[] data = dataList.serialize();
 
-        long startOffset = delayedStream.getStartOffset();
-        long captionOffset = caption.getBegin();
-        AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
-        packet.setAbsTimecode(startOffset + captionOffset);
-        if (debugLog)
-            logger.info(CLASS_NAME + ".handleCaption: packet = " + packet + ", stream buffer: " + delayedStream.getFirstPacketTimecode() + " - " + delayedStream.getLastPacketTimecode());
-        delayedStream.writePacket(packet);
+    long startOffset = delayedStream.getStartOffset();
+    long captionOffset = caption.getBegin();
+    AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
+    packet.setAbsTimecode(startOffset + captionOffset);
+    if (debugLog)
+        logger.info(CLASS_NAME + ".handleCaption: packet = " + packet + ", stream buffer: " + delayedStream.getFirstPacketTimecode() + " - " + delayedStream.getLastPacketTimecode());
+    delayedStream.writePacket(packet);
 
-        // persist caption to Mongo (if available)
-        if (mongo != null && mongo.getClient() != null && isMainStream) {
-            try {
-                logger.info("mainStram found. Persisting caption to Mongo DB");
-                // determine customer from the connected Events_<customer> database name
-                String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
-                String customer = null;
-                if (eventsDbName != null) {
-                    if (eventsDbName.startsWith("Events_")) {
-                        customer = eventsDbName.substring("Events_".length());
-                    } else if (eventsDbName.startsWith("Customer_")) {
-                        customer = eventsDbName.substring("Customer_".length());
-                    }
+    // persist caption to Mongo (if available)
+    if (mongo != null && mongo.getClient() != null && isMainStream) {
+        try {
+            logger.info("mainStram found. Persisting caption to Mongo DB");
+            String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
+            String customer = null;
+            if (eventsDbName != null) {
+                if (eventsDbName.startsWith("Events_")) {
+                    customer = eventsDbName.substring("Events_".length());
+                } else if (eventsDbName.startsWith("Customer_")) {
+                    customer = eventsDbName.substring("Customer_".length());
                 }
-                String captionsDbName = customer != null ? "Captions_" + customer : mongo.getDatabase().getName();
-                // resolve event collection name (event id) from Events_<customer> or use provided one
-                String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
-                // Store video timecode (captionOffset) for syncing across all streams
-                Document doc = new Document()
-                        .append("mainStream", streamName)
-                        .append("language", caption.getLanguage())
-                        .append("text", caption.getText())
-                        .append("trackId", caption.getTrackId())
-                        .append("videoTimecode", captionOffset)
-                        .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
-                        .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
-                        .append("publishTime", Date.from(CaptionHelper.epochInstantFromMillis(startOffset + captionOffset)))
-                        .append("createdAt", new Date());
-                InsertOneResult res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection).insertOne(doc);
-                if (res != null && res.getInsertedId() != null) {
-                    ObjectId id = res.getInsertedId().asObjectId().getValue();
-                    long absTime = startOffset + captionOffset;
-                    pendingCaptionByAbsTime.put(absTime, id);
-                    if (debugLog)
-                        logger.info(CLASS_NAME + ".handleCaption: persisted caption id=" + id + " absTime=" + absTime + " DB=" + captionsDbName + " coll=" + eventCollection);
-                } else {
-                    logger.info(CLASS_NAME + ".handleCaption: persisted caption to Mongo DB=" + captionsDbName + " collection=" + eventCollection);
-                }
-            } catch (Exception e) {
-                logger.error(CLASS_NAME + ".handleCaption: failed to persist caption: " + e.getMessage(), e);
             }
+            String captionsDbName = customer != null ? "Captions_" + customer : mongo.getDatabase().getName();
+            String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
+
+            // Speichere zusätzlich die absolute Systemzeit, wann das Caption erscheinen soll
+            long systemTime = System.currentTimeMillis();
+
+            Document doc = new Document()
+                    .append("mainStream", streamName)
+                    .append("language", caption.getLanguage())
+                    .append("text", caption.getText())
+                    .append("trackId", caption.getTrackId())
+                    .append("videoTimecode", captionOffset)
+                    .append("systemTime", systemTime)
+                    .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
+                    .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
+                    .append("publishTime", Date.from(CaptionHelper.epochInstantFromMillis(startOffset + captionOffset)))
+                    .append("createdAt", new Date());
+            InsertOneResult res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection).insertOne(doc);
+            if (res != null && res.getInsertedId() != null) {
+                ObjectId id = res.getInsertedId().asObjectId().getValue();
+                long absTime = startOffset + captionOffset;
+                pendingCaptionByAbsTime.put(absTime, id);
+                if (debugLog)
+                    logger.info(CLASS_NAME + ".handleCaption: persisted caption id=" + id + " absTime=" + absTime + " DB=" + captionsDbName + " coll=" + eventCollection);
+            } else {
+                logger.info(CLASS_NAME + ".handleCaption: persisted caption to Mongo DB=" + captionsDbName + " collection=" + eventCollection);
+            }
+        } catch (Exception e) {
+            logger.error(CLASS_NAME + ".handleCaption: failed to persist caption: " + e.getMessage(), e);
         }
     }
+}
 
     @Override
     public int getWordsPerMinute()
@@ -238,122 +240,78 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         return new CaptionTiming(start, end);
     }
 
-    private void startChangeStreamWatcher() {
-        if (watcherRunning) return;
-        watcherRunning = true;
-        watcherExecutor.submit(() -> {
-            try {
-                String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
-                String customer = null;
-                if (eventsDbName != null) {
-                    if (eventsDbName.startsWith("Events_")) {
-                        customer = eventsDbName.substring("Events_".length());
-                    } else if (eventsDbName.startsWith("Customer_")) {
-                        customer = eventsDbName.substring("Customer_".length());
-                    }
+private void startChangeStreamWatcher() {
+    if (watcherRunning) return;
+    watcherRunning = true;
+    // Set zum Verhindern doppelter Ausspielungen
+    java.util.Set<ObjectId> alreadyPublished = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+    watcherExecutor.submit(() -> {
+        try {
+            String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
+            String customer = null;
+            if (eventsDbName != null) {
+                if (eventsDbName.startsWith("Events_")) {
+                    customer = eventsDbName.substring("Events_".length());
+                } else if (eventsDbName.startsWith("Customer_")) {
+                    customer = eventsDbName.substring("Customer_".length());
                 }
-                String captionsDbName = customer != null ? "Captions_" + customer : (mongo.getDatabase() != null ? mongo.getDatabase().getName() : null);
-                // resolve event collection (the event id) for this stream
-                String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
-                MongoCollection<Document> coll = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection);
-                var changeStream = coll.watch().fullDocument(FullDocument.UPDATE_LOOKUP);
-                try (MongoCursor<ChangeStreamDocument<Document>> cursor = changeStream.iterator()) {
-                    while (watcherRunning && cursor.hasNext()) {
-                        ChangeStreamDocument<Document> change = cursor.next();
-                        if (change == null)
-                            continue;
-
-                        // Main stream: skip inserts (own captions), only react to updates
-                        // Non-main streams: react to both inserts and updates
-
-                        String operationType = change.getOperationType() != null ? change.getOperationType().getValue() : null;
-                        if (isMainStream && "insert".equals(operationType)) {
-                            if (debugLog)
-                                logger.info(CLASS_NAME + ".changeWatcher: mainStream skipping own insert for stream " + streamName);
-                            continue;
-                        }
-
-                        Document full = change.getFullDocument();
-                        if (full == null)
-                            continue;
-                        try {
-                            // incoming caption doc is stored per-event (collection==event id) so no stream filter needed
-                            // keep a defensive check in case doc contains stream field
-
-                           // String docStream = full.getString("stream");
-                            //if (docStream != null && !docStream.equals(this.streamName))
-                            //    continue;
-                            // Map document to caption-like payload and send into delayed stream
-                            String language = full.getString("language");
-                            String text = full.getString("text");
-                            int trackId = full.containsKey("trackId") ? full.getInteger("trackId", 99) : 99;
-
-                            // Use videoTimecode for sync across all streams (regardless of stream start time)
-                            Long videoTimecode = full.getLong("videoTimecode");
-                            if (videoTimecode == null) {
-                                // Fallback to startTime for backwards compatibility
-                                Date dStart = full.getDate("startTime");
-                                if (dStart == null) {
-                                    if (debugLog)
-                                        logger.warn(CLASS_NAME + ".changeWatcher: document missing videoTimecode and startTime: " + full.toJson());
-                                    continue;
-                                }
-                                videoTimecode = Duration.between(dotNetEpoch, dStart.toInstant()).toMillis();
-                            }
-                            long captionBegin = videoTimecode;
-
-                            long startOffset = delayedStream.getStartOffset();
-                            if (startOffset == -1) {
-                                if (debugLog)
-                                    logger.info(CLASS_NAME + ".changeWatcher: startOffset not yet set, skipping change for " + streamName);
-                                continue;
-                            }
-
-                            // if this caption already showed in the live stream, mark it as shown in DB and skip
-                            // Compare video timecode with relative stream timecode (publishedThreshold - startOffset)
-                            long publishedThreshold = delayedStream.getPublishedStreamTimecode();
-                            long relativePublishedTime = publishedThreshold != -1 ? (publishedThreshold - startOffset) : -1;
-                            boolean alreadyShownInStream = (relativePublishedTime != -1 && captionBegin <= relativePublishedTime);
-                            if (alreadyShownInStream) {
-                                boolean alreadyMarked = full.getBoolean("published", false);
-                                if (!alreadyMarked) {
-                                    try {
-                                        coll.updateOne(new Document("_id", full.getObjectId("_id")),
-                                            new Document("$set", new Document("published", true).append("publishedAt", new Date())));
-                                        if (debugLog)
-                                            logger.info(CLASS_NAME + ".changeWatcher: marked caption as published in DB for stream " + streamName + " id=" + full.getObjectId("_id"));
-                                    } catch (Exception e) {
-                                        logger.error(CLASS_NAME + ".changeWatcher: failed to mark shown in DB: " + e.getMessage(), e);
-                                    }
-                                }
-                                continue;
-                            }
-
-                            AMFDataObj amfData = new AMFDataObj();
-                            amfData.put("text", new AMFDataItem(text));
-                            amfData.put("language", new AMFDataItem(language));
-                            amfData.put("trackid", new AMFDataItem(trackId));
-
-                            AMFDataList dataList = new AMFDataList();
-                            dataList.add(new AMFDataItem("onTextData"));
-                            dataList.add(amfData);
-                            byte[] data = dataList.serialize();
-
-                            AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
-                            packet.setAbsTimecode(startOffset + captionBegin);
-                            if (debugLog)
-                                logger.info(CLASS_NAME + ".changeWatcher: emitting updated caption packet = " + packet + " for stream " + streamName);
-                            delayedStream.writePacket(packet);
-                        } catch (Exception e) {
-                            logger.error(CLASS_NAME + ".changeWatcher: error processing change: " + e.getMessage(), e);
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                logger.error(CLASS_NAME + ".startChangeStreamWatcher: watcher failed: " + e.getMessage(), e);
             }
-        });
-    }
+            String captionsDbName = customer != null ? "Captions_" + customer : (mongo.getDatabase() != null ? mongo.getDatabase().getName() : null);
+            String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
+            MongoCollection<Document> coll = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection);
+            var changeStream = coll.watch().fullDocument(FullDocument.UPDATE_LOOKUP);
+            try (MongoCursor<ChangeStreamDocument<Document>> cursor = changeStream.iterator()) {
+                while (watcherRunning && cursor.hasNext()) {
+                    ChangeStreamDocument<Document> change = cursor.next();
+                    if (change == null)
+                        continue;
+
+                    // Nur im !mainStream auf published-Events reagieren
+                    if (isMainStream)
+                        continue;
+
+                    Document full = change.getFullDocument();
+                    if (full == null)
+                        continue;
+
+                    ObjectId captionId = full.getObjectId("_id");
+                    boolean isPublished = full.getBoolean("published", false);
+                    Date publishedAt = full.getDate("publishedAt");
+
+                    // Nur published-Events verarbeiten und doppelte Ausspielung verhindern
+                    if (isPublished && publishedAt != null && captionId != null && !alreadyPublished.contains(captionId)) {
+                        alreadyPublished.add(captionId);
+
+                        String language = full.getString("language");
+                        String text = full.getString("text");
+                        int trackId = full.containsKey("trackId") ? full.getInteger("trackId", 99) : 99;
+
+                        AMFDataObj amfData = new AMFDataObj();
+                        amfData.put("text", new AMFDataItem(text));
+                        amfData.put("language", new AMFDataItem(language));
+                        amfData.put("trackid", new AMFDataItem(trackId));
+
+                        AMFDataList dataList = new AMFDataList();
+                        dataList.add(new AMFDataItem("onTextData"));
+                        dataList.add(amfData);
+                        byte[] data = dataList.serialize();
+
+                        // Caption mit aktuellem Stream-Zeitcode ausspielen
+                        long nowTimecode = delayedStream.getPublishedStreamTimecode();
+                        AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
+                        packet.setAbsTimecode(nowTimecode + 1); // sofort ausspielen
+                        delayedStream.writePacket(packet);
+
+                        if (debugLog)
+                            logger.info(CLASS_NAME + ".changeWatcher: instantly published caption for stream " + streamName + " id=" + captionId);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error(CLASS_NAME + ".startChangeStreamWatcher: watcher failed: " + e.getMessage(), e);
+        }
+    });
+}
 
     public void stopChangeStreamWatcher() {
         watcherRunning = false;

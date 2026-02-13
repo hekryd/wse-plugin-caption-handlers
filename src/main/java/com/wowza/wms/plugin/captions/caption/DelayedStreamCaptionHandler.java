@@ -119,8 +119,6 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             this.delayedStream.setPublishListener((absTimecode, packet) -> {
                 try {
                     ObjectId id = pendingCaptionByAbsTime.remove(absTimecode);
-                    if (id == null)
-                        return;
                     String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
                     String customer = null;
                     if (eventsDbName != null) {
@@ -132,11 +130,31 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     }
                     String captionsDbName = customer != null ? "Captions_" + customer : (mongo.getDatabase() != null ? mongo.getDatabase().getName() : null);
                     String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
-                    if (captionsDbName != null && eventCollection != null) {
-                        mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
-                                .updateOne(new Document("_id", id), new Document("$set", new Document("published", true).append("publishedAt", new Date())));
-                        if (debugLog)
-                            logger.info(CLASS_NAME + ".publishListener: marked published for id=" + id + " db=" + captionsDbName + " coll=" + eventCollection);
+
+                    if (id != null) {
+                        if (captionsDbName != null && eventCollection != null) {
+                            mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
+                                    .updateOne(new Document("_id", id), new Document("$set", new Document("published", true).append("publishedAt", new Date())));
+                            if (debugLog)
+                                logger.info(CLASS_NAME + ".publishListener: marked published for id=" + id + " db=" + captionsDbName + " coll=" + eventCollection);
+                        }
+                    } else {
+                        // Fallback: try to find the document by publishTime within a small range and mark it published
+                        try {
+                            if (captionsDbName != null && eventCollection != null) {
+                                Date publishDate = Date.from(CaptionHelper.epochInstantFromMillis(absTimecode));
+                                long from = publishDate.getTime() - 1000L;
+                                long to = publishDate.getTime() + 1000L;
+                                Document timeRange = new Document("$gte", new Date(from)).append("$lte", new Date(to));
+                                Document filter = new Document("publishTime", timeRange).append("published", new Document("$ne", true));
+                                var updateRes = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
+                                        .updateOne(filter, new Document("$set", new Document("published", true).append("publishedAt", new Date())));
+                                if (debugLog)
+                                    logger.info(CLASS_NAME + ".publishListener: fallback update by time range for absTimecode=" + absTimecode + " db=" + captionsDbName + " coll=" + eventCollection + " modifiedCount=" + (updateRes != null ? updateRes.getModifiedCount() : 0));
+                            }
+                        } catch (Exception ex) {
+                            logger.error(CLASS_NAME + ".publishListener: fallback update failed: " + ex.getMessage(), ex);
+                        }
                     }
                 } catch (Exception e) {
                     logger.error(CLASS_NAME + ".publishListener: error marking shown: " + e.getMessage(), e);
@@ -218,19 +236,19 @@ public void handleCaption(Caption caption)
     }
 }
 
-    @Override
-    public int getWordsPerMinute()
-    {
-        return wordsPerMinute;
-    }
+@Override
+public int getWordsPerMinute()
+{
+    return wordsPerMinute;
+}
 
-    @Override
-    public void setWordsPerMinute(int wordsPerMinute)
-    {
-        this.wordsPerMinute = wordsPerMinute;
-    }
+@Override
+public void setWordsPerMinute(int wordsPerMinute)
+{
+    this.wordsPerMinute = wordsPerMinute;
+}
 
-    public CaptionTiming getCaptionTiming()
+public CaptionTiming getCaptionTiming()
     {
         long startOffset = delayedStream.getStartOffset();
         long firstTC = delayedStream.getFirstPacketTimecode();

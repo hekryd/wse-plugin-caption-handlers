@@ -28,6 +28,7 @@ public class Mongo {
     private String truststorePath;
     private String truststorePassword;
     private boolean allowInvalidHostname = false;
+    private boolean mainServer = false;
     
     // Default constructor that loads from properties file
     public Mongo() {
@@ -58,6 +59,9 @@ public class Mongo {
         this.truststorePath = props.getProperty("mongo.truststore.path");
         this.truststorePassword = props.getProperty("mongo.truststore.password");
         this.allowInvalidHostname = Boolean.parseBoolean(props.getProperty("mongo.tls.allowInvalidHostname", "false"));
+        // mainServer controls whether this Wowza instance should process audio
+        // If undefined or not a valid boolean, default to false (don't process audio)
+        this.mainServer = Boolean.parseBoolean(props.getProperty("mongo.mainServer", "false"));
         
         // Validate configuration
         if (connectionString == null || databaseName == null || keystorePath == null || keystorePassword == null) {
@@ -112,6 +116,10 @@ public class Mongo {
     
     public MongoDatabase getDatabase() {
         return database;
+    }
+
+    public boolean isMainServer() {
+        return mainServer;
     }
     
     public MongoClient getClient() {

@@ -112,8 +112,18 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
     }
 
     private boolean isMainStream(String streamName) {
-        if (mongo == null || mongo.getDatabase() == null)
-            return true; // Default to true if no mongo connection
+        //wow-03 cant be mainstream only wow-01
+        if (mongo == null)
+            return true; // Default to true if no mongo instance provided
+
+        // If configuration explicitly marks this instance as non-main, don't process audio
+        try {
+            if (!mongo.isMainServer())
+                return false;
+        } catch (Exception ignore) {}
+
+        if (mongo.getDatabase() == null)
+            return true; // Default to true if no mongo database connection
 
         try {
             String streamLanguage = null;

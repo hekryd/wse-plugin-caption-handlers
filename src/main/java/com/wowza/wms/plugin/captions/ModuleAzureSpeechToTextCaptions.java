@@ -99,10 +99,10 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                 logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
                 liveEventCollection = collectionName;
                 Document captionConfig = eventConfig.get("caption_config", Document.class);
+                    appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
                 if (captionConfig != null) {
                     enabled = captionConfig.getBoolean("enabled", enabled);
                     added_stream_delay_in_ms = captionConfig.getInteger("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                    appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
                     logger.info(MODULE_NAME + ".onAppStart set added_stream_delay_in_ms property: " + added_stream_delay_in_ms);
                     /* 
                     enabled_languages = captionConfig.getList("enabled_captions", String.class);

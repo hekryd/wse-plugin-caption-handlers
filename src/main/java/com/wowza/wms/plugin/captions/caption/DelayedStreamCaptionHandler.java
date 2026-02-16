@@ -17,9 +17,15 @@ import java.time.*;
 import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Future;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.LinkedHashMap;
+import java.util.Collections;
 import com.mongodb.client.result.InsertOneResult;
 import org.bson.types.ObjectId;
 
@@ -37,6 +43,11 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private static final Class<DelayedStreamCaptionHandler> CLASS = DelayedStreamCaptionHandler.class;
     private static final String CLASS_NAME = CLASS.getSimpleName();
     private static final int DEFAULT_WORDS_PER_MINUTE = 150;
+    
+    // FIXED: Add size limits for caches
+    private static final int MAX_STREAM_CACHE_SIZE = 100;
+    private static final int MAX_PUBLISHED_CACHE_SIZE = 10000;
+    
     private final DelayedStream delayedStream;
     private final WMSLogger logger;
     private final boolean debugLog;
@@ -48,8 +59,31 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private int wordsPerMinute = DEFAULT_WORDS_PER_MINUTE;
     private final ExecutorService watcherExecutor;
     private volatile boolean watcherRunning = false;
-    private final Map<String, String> streamToEventCollection = new ConcurrentHashMap<>();
-    private final ConcurrentMap<Long, ObjectId> pendingCaptionByAbsTime = new ConcurrentHashMap<>();
+    
+    // FIXED: Use bounded LinkedHashMap instead of unbounded ConcurrentHashMap
+    private final Map<String, String> streamToEventCollection = Collections.synchronizedMap(
+        new LinkedHashMap<String, String>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+                return size() > MAX_STREAM_CACHE_SIZE;
+            }
+        }
+    );
+    
+    private static class PendingCaption {
+        final ObjectId id;
+        final long insertedAt;
+        PendingCaption(ObjectId id, long insertedAt) { this.id = id; this.insertedAt = insertedAt; }
+    }
+
+    private final ConcurrentMap<Long, PendingCaption> pendingCaptionByAbsTime = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "CaptionPendingCleanup"));
+    private ScheduledFuture<?> cleanupFuture;
+    private volatile MongoCursor<ChangeStreamDocument<Document>> watcherCursor;
+    private volatile Future<?> watcherFuture;
+    
+    // FIXED: Add bounded cache for published IDs cleanup
+    private volatile Map<ObjectId, Long> publishedCaptionIds;
 
     public DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName)
     {
@@ -60,6 +94,19 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         this.mongo = mongo;
         this.eventCollectionName = eventCollectionName;
         this.watcherExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "CaptionChangeWatcher-" + streamName));
+        
+        // FIXED: Initialize bounded published IDs cache
+        this.publishedCaptionIds = Collections.synchronizedMap(
+            new LinkedHashMap<ObjectId, Long>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<ObjectId, Long> eldest) {
+                    // Remove entries older than 5 minutes or if cache exceeds size
+                    long now = System.currentTimeMillis();
+                    return size() > MAX_PUBLISHED_CACHE_SIZE || 
+                           (eldest.getValue() != null && (now - eldest.getValue()) > TimeUnit.MINUTES.toMillis(5));
+                }
+            }
+        );
 
         // attempt to detect whether this delayed stream corresponds to the main stream
         try {
@@ -110,15 +157,18 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             logger.error(CLASS_NAME + ".init: error detecting main stream: " + e.getMessage(), e);
         }
 
-        // start watcher if mongo is available
+        // start watcher & cleanup if mongo is available
         if (this.mongo != null && this.mongo.getDatabase() != null) {
             startChangeStreamWatcher();
+            startPendingCleanupTask();
         }
         // register as publish listener so we can mark captions shown when actually published
         try {
+            // register publish listener; store pending captions with insertion time so we can cleanup if not published
             this.delayedStream.setPublishListener((absTimecode, packet) -> {
                 try {
-                    ObjectId id = pendingCaptionByAbsTime.remove(absTimecode);
+                    PendingCaption pc = pendingCaptionByAbsTime.remove(absTimecode);
+                    ObjectId id = pc != null ? pc.id : null;
                     String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
                     String customer = null;
                     if (eventsDbName != null) {
@@ -224,7 +274,7 @@ public void handleCaption(Caption caption)
             if (res != null && res.getInsertedId() != null) {
                 ObjectId id = res.getInsertedId().asObjectId().getValue();
                 long absTime = startOffset + captionOffset;
-                pendingCaptionByAbsTime.put(absTime, id);
+                pendingCaptionByAbsTime.put(absTime, new PendingCaption(id, System.currentTimeMillis()));
                 if (debugLog)
                     logger.info(CLASS_NAME + ".handleCaption: persisted caption id=" + id + " absTime=" + absTime + " DB=" + captionsDbName + " coll=" + eventCollection);
             } else {
@@ -261,9 +311,11 @@ public CaptionTiming getCaptionTiming()
 private void startChangeStreamWatcher() {
     if (watcherRunning) return;
     watcherRunning = true;
-    // Set zum Verhindern doppelter Ausspielungen
-    java.util.Set<ObjectId> alreadyPublished = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
-    watcherExecutor.submit(() -> {
+    
+    watcherFuture = watcherExecutor.submit(() -> {
+        // FIXED: Use bounded cache instead of unbounded Set
+        final Map<ObjectId, Long> localPublishedCache = publishedCaptionIds;
+        
         try {
             String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
             String customer = null;
@@ -278,11 +330,27 @@ private void startChangeStreamWatcher() {
             String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
             MongoCollection<Document> coll = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection);
             var changeStream = coll.watch().fullDocument(FullDocument.UPDATE_LOOKUP);
-            try (MongoCursor<ChangeStreamDocument<Document>> cursor = changeStream.iterator()) {
-                while (watcherRunning && cursor.hasNext()) {
-                    ChangeStreamDocument<Document> change = cursor.next();
-                    if (change == null)
+            MongoCursor<ChangeStreamDocument<Document>> cursor = null;
+            try {
+                cursor = changeStream.iterator();
+                watcherCursor = cursor;
+                while (watcherRunning) {
+                    ChangeStreamDocument<Document> change = null;
+                    try {
+                        change = cursor.tryNext();
+                    } catch (NoSuchMethodError | UnsupportedOperationException ignored) {
+                        // fallback: try blocking hasNext/next with short sleeps to be responsive to shutdown
+                        if (!watcherRunning) break;
+                        if (!cursor.hasNext()) {
+                            Thread.sleep(200);
+                            continue;
+                        }
+                        change = cursor.next();
+                    }
+                    if (change == null) {
+                        Thread.sleep(200);
                         continue;
+                    }
 
                     // Nur im !mainStream auf published-Events reagieren
                     if (isMainStream)
@@ -296,9 +364,9 @@ private void startChangeStreamWatcher() {
                     boolean isPublished = full.getBoolean("published", false);
                     Date publishedAt = full.getDate("publishedAt");
 
-                    // Nur published-Events verarbeiten und doppelte Ausspielung verhindern
-                    if (isPublished && publishedAt != null && captionId != null && !alreadyPublished.contains(captionId)) {
-                        alreadyPublished.add(captionId);
+                    // FIXED: Check bounded cache instead of unbounded set
+                    if (isPublished && publishedAt != null && captionId != null && !localPublishedCache.containsKey(captionId)) {
+                        localPublishedCache.put(captionId, System.currentTimeMillis());
 
                         String language = full.getString("language");
                         String text = full.getString("text");
@@ -324,6 +392,9 @@ private void startChangeStreamWatcher() {
                             logger.info(CLASS_NAME + ".changeWatcher: instantly published caption for stream " + streamName + " id=" + captionId);
                     }
                 }
+            } finally {
+                try { if (cursor != null) cursor.close(); } catch (Exception ignore) {}
+                watcherCursor = null;
             }
         } catch (Exception e) {
             logger.error(CLASS_NAME + ".startChangeStreamWatcher: watcher failed: " + e.getMessage(), e);
@@ -333,7 +404,73 @@ private void startChangeStreamWatcher() {
 
     public void stopChangeStreamWatcher() {
         watcherRunning = false;
-        watcherExecutor.shutdownNow();
+        try {
+            if (watcherCursor != null) {
+                try { watcherCursor.close(); } catch (Exception ignore) {}
+            }
+            if (watcherFuture != null) {
+                watcherFuture.cancel(true);
+            }
+            watcherExecutor.shutdownNow();
+            watcherExecutor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignore) {
+        }
+    }
+
+    private void startPendingCleanupTask() {
+        try {
+            long retentionMillis = TimeUnit.MINUTES.toMillis(10);
+            cleanupFuture = cleanupExecutor.scheduleAtFixedRate(() -> {
+                try {
+                    long now = System.currentTimeMillis();
+                    // FIXED: Use iterator to safely remove during iteration
+                    var iterator = pendingCaptionByAbsTime.entrySet().iterator();
+                    while (iterator.hasNext()) {
+                        var entry = iterator.next();
+                        PendingCaption pc = entry.getValue();
+                        if (pc != null && (now - pc.insertedAt) > retentionMillis) {
+                            iterator.remove();
+                        }
+                    }
+                    
+                    // FIXED: Also cleanup published IDs cache periodically
+                    if (publishedCaptionIds != null) {
+                        var pubIterator = publishedCaptionIds.entrySet().iterator();
+                        while (pubIterator.hasNext()) {
+                            var entry = pubIterator.next();
+                            Long timestamp = entry.getValue();
+                            if (timestamp != null && (now - timestamp) > TimeUnit.MINUTES.toMillis(5)) {
+                                pubIterator.remove();
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    if (debugLog)
+                        logger.warn(CLASS_NAME + ".cleanupTask: error during cleanup: " + e.getMessage());
+                }
+            }, 1, 1, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            if (debugLog)
+                logger.warn(CLASS_NAME + ".startPendingCleanupTask: " + e.getMessage());
+        }
+    }
+
+    public void close() {
+        try { stopChangeStreamWatcher(); } catch (Exception ignore) {}
+        try { delayedStream.setPublishListener(null); } catch (Exception ignore) {}
+        try {
+            if (cleanupFuture != null) cleanupFuture.cancel(true);
+            cleanupExecutor.shutdownNow();
+            cleanupExecutor.awaitTermination(3, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignore) {}
+        // FIXED: Clear all caches on close
+        try { pendingCaptionByAbsTime.clear(); } catch (Exception ignore) {}
+        try { streamToEventCollection.clear(); } catch (Exception ignore) {}
+        try { if (publishedCaptionIds != null) publishedCaptionIds.clear(); } catch (Exception ignore) {}
     }
 
     private String resolveEventCollectionForStream() {

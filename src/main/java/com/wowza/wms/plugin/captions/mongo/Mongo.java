@@ -45,7 +45,7 @@ public class Mongo {
         Properties props = new Properties();
         
         // Try to load local configuration first
-        String configPath = "/usr/local/WowzaStreamingEngine/custom-plugin-resources/mongo-local.properties";
+        String configPath = "/usr/local/WowzaStreamingEngine/custom-plugin-resources/env.properties";
         try (FileInputStream fis = new FileInputStream(configPath)) {
             props.load(fis);
             logger.info("Loaded MongoDB configuration from: " + configPath);
@@ -61,7 +61,7 @@ public class Mongo {
         this.allowInvalidHostname = Boolean.parseBoolean(props.getProperty("mongo.tls.allowInvalidHostname", "false"));
         // mainServer controls whether this Wowza instance should process audio
         // If undefined or not a valid boolean, default to false (don't process audio)
-        this.mainServer = Boolean.parseBoolean(props.getProperty("mongo.mainServer", "false"));
+        this.mainServer = Boolean.parseBoolean(props.getProperty("wowza.mainServer", "false"));
         
         // Validate configuration
         if (connectionString == null || databaseName == null || keystorePath == null || keystorePassword == null) {

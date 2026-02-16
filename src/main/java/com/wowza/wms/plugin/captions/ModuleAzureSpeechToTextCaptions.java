@@ -95,7 +95,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         //go in every collection in the list in asc order and get the document with the _id "event_config" and check if phase is "live" if found stop and log the event name
         for (String collectionName : collections) {
             Document eventConfig = mongo.getDatabase().getCollection(collectionName).find(new Document("_id", "event_config")).first();
-            if (eventConfig != null && "live".equals(eventConfig.getString("phase"))) {
+            if (eventConfig != null && eventConfig.getBoolean("nextEventToBeCaptioned", false)) {
                 logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
                 liveEventCollection = collectionName;
                 Document captionConfig = eventConfig.get("caption_config", Document.class);

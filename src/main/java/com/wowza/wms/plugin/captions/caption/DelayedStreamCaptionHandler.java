@@ -170,7 +170,7 @@ public void handleCaption(Caption caption)
 {
     if (debugLog)
         logger.info(CLASS_NAME + ".handleCaption: caption = " + caption);
-    if (delayedStream == null && !this.isMainStream)
+    if (delayedStream == null || !this.isMainStream)
         return;
     AMFDataObj amfData = new AMFDataObj();
     amfData.put("text", new AMFDataItem(caption.getText()));

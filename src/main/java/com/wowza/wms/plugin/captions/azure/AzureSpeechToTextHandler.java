@@ -227,7 +227,18 @@ public class AzureSpeechToTextHandler implements SpeechHandler
     @Override
     public void addAudioFrame(TranscoderNativeAudioFrame frame)
     {
-        audioStream.write(frame.buffer);
+        try {
+            audioStream.write(frame.buffer);
+        }
+        catch (IllegalStateException ise)
+        {
+            if (debugLog)
+                logger.warn(MODULE_NAME + "::" + CLASS_NAME + " addAudioFrame: audioStream closed, ignoring frame");
+        }
+        catch (Exception e)
+        {
+            logger.error(MODULE_NAME + "::" + CLASS_NAME + " addAudioFrame exception", e);
+        }
     }
 
     @Override

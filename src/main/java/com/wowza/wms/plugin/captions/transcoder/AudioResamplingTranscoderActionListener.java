@@ -84,7 +84,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             {
                 DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
                         name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
-                CaptionHandler captionHandler = new DelayedStreamCaptionHandler(appInstance, delayedStream, mappedName, mongo, eventCollection);
+                CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo, eventCollection);
 
             // Only create speech handler for main stream
             if (!isMainStream) {

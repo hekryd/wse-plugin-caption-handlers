@@ -32,6 +32,7 @@ import org.bson.types.ObjectId;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.changestream.FullDocument;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
+import com.mongodb.client.model.changestream.OperationType;
 import org.bson.Document;
 import com.mongodb.client.MongoCursor;
 
@@ -352,10 +353,6 @@ private void startChangeStreamWatcher() {
                         continue;
                     }
 
-                    // Nur im !mainStream auf published-Events reagieren
-                    if (isMainStream)
-                        continue;
-
                     Document full = change.getFullDocument();
                     if (full == null)
                         continue;
@@ -363,6 +360,39 @@ private void startChangeStreamWatcher() {
                     ObjectId captionId = full.getObjectId("_id");
                     boolean isPublished = full.getBoolean("published", false);
                     Date publishedAt = full.getDate("publishedAt");
+
+                    // react to updates/replaces by immediately sending an updated caption packet
+                    try {
+                        OperationType opType = change.getOperationType();
+                        if (opType == OperationType.UPDATE || opType == OperationType.REPLACE) {
+                            String language = full.getString("language");
+                            String text = full.getString("text");
+                            int trackId = full.containsKey("trackId") ? full.getInteger("trackId", 99) : 99;
+
+                            AMFDataObj amfDataU = new AMFDataObj();
+                            amfDataU.put("text", new AMFDataItem(text));
+                            amfDataU.put("language", new AMFDataItem(language));
+                            amfDataU.put("trackid", new AMFDataItem(trackId));
+
+                            AMFDataList dataListU = new AMFDataList();
+                            dataListU.add(new AMFDataItem("onTextData"));
+                            dataListU.add(amfDataU);
+                            byte[] dataU = dataListU.serialize();
+
+                            long nowTimecodeU = delayedStream.getPublishedStreamTimecode();
+                            AMFPacket packetU = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, dataU);
+                            packetU.setAbsTimecode(nowTimecodeU + 1);
+                            delayedStream.writePacket(packetU);
+
+                            if (debugLog)
+                                logger.info(CLASS_NAME + 
+                                        ".changeWatcher: applied text update for id=" + captionId + " stream=" + streamName);
+                            // we've applied the update; continue to next change
+                            continue;
+                        }
+                    } catch (Exception e) {
+                        logger.error(CLASS_NAME + ".changeWatcher: failed to handle update event: " + e.getMessage(), e);
+                    }
 
                     // FIXED: Check bounded cache instead of unbounded set
                     if (isPublished && publishedAt != null && captionId != null && !localPublishedCache.containsKey(captionId)) {

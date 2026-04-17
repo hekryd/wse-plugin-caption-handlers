@@ -102,12 +102,15 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                 Document captionConfig = eventConfig.get("caption_config", Document.class);
                 //log caption config
                 //logger.info(MODULE_NAME + ".onAppStart captionConfig: " + captionConfig);
-                    appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                if (captionConfig != null) {
                     enabled = captionConfig.getBoolean("enabled", enabled);
-                    added_stream_delay_in_ms = captionConfig.getInteger("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                    //logger.info(MODULE_NAME + ".onAppStart set added_stream_delay_in_ms property: " + added_stream_delay_in_ms);
+                    added_stream_delay_in_ms = eventConfig.getInteger("added_stream_delay_in_ms", added_stream_delay_in_ms);
+                    logger.info(MODULE_NAME + ".onAppStart set added_stream_delay_in_ms property: " + added_stream_delay_in_ms);
+                    // publish standardized property so other components (DelayedStream, handlers) see it
+                    appInstance.getProperties().setProperty(PROP_CAPTIONS_STREAM_DELAY, added_stream_delay_in_ms);
+                    // keep the legacy key for backwards compatibility
+                    appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
                     
+                    /*  TODO: finish implementing dynamic language selection based on MongoDB config    
                     //logger.info(MODULE_NAME + ".onAppStart enabled_languages default: " + enabled_languages);
                     enabled_languages = captionConfig.getList("enabled_captions", String.class);
                     //logger.info(MODULE_NAME + ".onAppStart enabled_languages updated: " + enabled_languages);
@@ -123,7 +126,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                         
 
                     }
-                }
+                */
                 break;
             }
         }

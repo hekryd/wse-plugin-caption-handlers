@@ -14,6 +14,8 @@ import java.util.concurrent.atomic.*;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+import com.wowza.wms.logging.WMSLogger;
+import com.wowza.wms.logging.WMSLoggerFactory;
 public class CaptionHelper
 {
     final public static int defaultMaxLineLengthSBCS = 37;
@@ -34,6 +36,8 @@ public class CaptionHelper
     public static final Instant dotNetEpoch = ZonedDateTime.of(1, 1, 1, 0, 0, 0, 0,
             ZoneOffset.UTC).toInstant();
     private int trackId = 99;
+
+    private static final WMSLogger logger = WMSLoggerFactory.getLogger(CaptionHelper.class);
 
     public static Instant epochInstantFromTicks(BigInteger ticks)
     {
@@ -143,6 +147,9 @@ public class CaptionHelper
 
     private void addMultipleCaptions(List<String> captionLines)
     {
+        long totalMillis = Duration.between(this.captionTiming.begin, this.captionTiming.end).toMillis();
+        logger.info("Caption text requires splitting into multiple captions. Total duration: " + totalMillis + " ms, total lines: " + captionLines.size());
+
         Duration perLineDuration = Duration.between(this.captionTiming.begin, this.captionTiming.end)
                 .dividedBy(captionLines.size());
         AtomicReference<Instant> beginRef = new AtomicReference<>(this.captionTiming.begin);

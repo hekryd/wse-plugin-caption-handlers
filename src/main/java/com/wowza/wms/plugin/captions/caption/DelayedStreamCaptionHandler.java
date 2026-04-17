@@ -222,9 +222,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     } else {
                         // Fallback: find by publishTime within a small range
                         try {
-                            Date publishDate = Date.from(CaptionHelper.epochInstantFromMillis(absTimecode));
-                            long from = publishDate.getTime() - 1000L;
-                            long to = publishDate.getTime() + 1000L;
+                            long publishMillisWallClock = delayedStream.estimatedPublishTimeMillis(absTimecode);
+                            long from = publishMillisWallClock - 1000L;
+                            long to = publishMillisWallClock + 1000L;
                             Document timeRange = new Document("$gte", new Date(from)).append("$lte", new Date(to));
                             Document filter = new Document("publishTime", timeRange).append("published", new Document("$ne", true));
                             var updateRes = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
@@ -291,12 +291,12 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     .append("mainStream", streamName)
                     .append("language", caption.getLanguage())
                     .append("text", caption.getText())
-                    .append("trackId", caption.getTrackId())
+                    //.append("trackId", caption.getTrackId())
                     .append("videoTimecode", captionOffset)
                     .append("systemTime", systemTime)
                     .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
                     .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
-                    .append("publishTime", Date.from(CaptionHelper.epochInstantFromMillis(publishMillis)))
+                    .append("publishTime", new Date(delayedStream.estimatedPublishTimeMillis(publishMillis)))
                     .append("createdAt", new Date());
 
                 InsertOneResult res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection).insertOne(doc);

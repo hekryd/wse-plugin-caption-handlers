@@ -79,7 +79,11 @@ public class AzureSpeechToTextHandler implements SpeechHandler
       if (!isBCP47WithRegion(recognitionLanguage))
           throw new RuntimeException("Invalid recognition language: " + recognitionLanguage);
 
-        String languagesStr = appInstance.getTimedTextProperties().getPropertyStr(PROP_DEFAULT_CAPTION_LANGUAGES, ITimedTextConstants.LANGUAGE_ID_ENGLISH);
+        String enabledCsv = appInstance.getProperties().getPropertyStr("enabled_captions_csv", null);
+        String languagesStr = (enabledCsv == null || enabledCsv.isBlank())
+                ? appInstance.getTimedTextProperties().getPropertyStr(PROP_DEFAULT_CAPTION_LANGUAGES, ITimedTextConstants.LANGUAGE_ID_ENGLISH)
+                : enabledCsv;
+
         languageMap = Arrays.stream(languagesStr.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isBlank())

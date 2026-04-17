@@ -22,6 +22,7 @@ import java.util.concurrent.*;
 import org.bson.Document;
 import com.wowza.wms.plugin.captions.mongo.Mongo;
 
+
 public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 {
     static
@@ -56,8 +57,8 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
     //event_config
     private boolean enabled = false;
-    private int added_stream_delay_in_ms = 30;
-    //private List<String> enabled_languages = Arrays.asList();
+    private int added_stream_delay_in_ms = 30000;
+    private List<String> enabled_languages =  Arrays.asList("de","en"); 
 
     public void onAppCreate(IApplicationInstance appInstance)
     {
@@ -78,38 +79,50 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
     public void onAppStart(IApplicationInstance appInstance)
     {
-        logger.error(MODULE_NAME + ".onAppStart initializing MongoDB connection");
+        //logger.error(MODULE_NAME + ".onAppStart initializing MongoDB connection");
         customer = appInstance.getApplication().getName().split("_")[0];
 
         mongo = new Mongo("Events_" + customer);
         if (mongo == null)
             logger.error(MODULE_NAME + ".onAppStart could not initialize MongoDB connection");
         mongo.connect();
-         logger.error(MODULE_NAME + ".onAppStart MongoDB connection initialized");
+         //logger.error(MODULE_NAME + ".onAppStart MongoDB connection initialized");
 
          // log a test query to verify connection
         List<String> collections = mongo.getDatabase().listCollectionNames().into(new ArrayList<>());
-        logger.error(MODULE_NAME + ".onAppStart MongoDB collections: " + collections.toString());
+        //logger.error(MODULE_NAME + ".onAppStart MongoDB collections: " + collections.toString());
         //reverse the collections list
         collections.sort(Comparator.reverseOrder());
         //go in every collection in the list in asc order and get the document with the _id "event_config" and check if phase is "live" if found stop and log the event name
         for (String collectionName : collections) {
             Document eventConfig = mongo.getDatabase().getCollection(collectionName).find(new Document("_id", "event_config")).first();
             if (eventConfig != null && eventConfig.getBoolean("nextEventToBeCaptioned", false)) {
-                logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
+               // logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
                 liveEventCollection = collectionName;
                 Document captionConfig = eventConfig.get("caption_config", Document.class);
+                //log caption config
+                //logger.info(MODULE_NAME + ".onAppStart captionConfig: " + captionConfig);
                     appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
                 if (captionConfig != null) {
                     enabled = captionConfig.getBoolean("enabled", enabled);
                     added_stream_delay_in_ms = captionConfig.getInteger("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                    logger.info(MODULE_NAME + ".onAppStart set added_stream_delay_in_ms property: " + added_stream_delay_in_ms);
-                    /* 
+                    //logger.info(MODULE_NAME + ".onAppStart set added_stream_delay_in_ms property: " + added_stream_delay_in_ms);
+                    
+                    //logger.info(MODULE_NAME + ".onAppStart enabled_languages default: " + enabled_languages);
                     enabled_languages = captionConfig.getList("enabled_captions", String.class);
-                    if (enabled_languages == null) {
-                        enabled_languages = Arrays.asList();
-                    }  
-                    */
+                    //logger.info(MODULE_NAME + ".onAppStart enabled_languages updated: " + enabled_languages);
+                    // make enabled languages available to other components (CSV)
+                    if (enabled_languages != null && !enabled_languages.isEmpty()) {
+                        String enabledCsv = String.join(",", enabled_languages);
+                        appInstance.getProperties().setProperty("enabled_captions_csv", enabledCsv);
+                        // also set timed text property for compatibility with existing code
+                        appInstance.getTimedTextProperties().setProperty(PROP_DEFAULT_CAPTION_LANGUAGES, enabledCsv);
+                        logger.info(MODULE_NAME + ".onAppStart set enabled_captions_csv: " + enabledCsv);
+                        // edit the smil file to include the enabled languages
+                        //log path first
+                        
+
+                    }
                 }
                 break;
             }

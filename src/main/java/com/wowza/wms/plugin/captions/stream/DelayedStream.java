@@ -238,6 +238,18 @@ public class DelayedStream
         return now - startDelay - (startTime - startOffset);
     }
 
+    /**
+     * Calculate the estimated wall-clock publish time (in ms since Unix epoch)
+     * for a packet with the given absolute timecode.
+     *
+     * Formula derived from the publish condition in processPackets():
+     * publishWallClock = startTime - startOffset + timecode + startDelay
+     */
+    public long estimatedPublishTimeMillis(long timecode)
+    {
+        return startTime - startOffset + timecode + startDelay;
+    }
+
     public long getFirstPacketTimecode()
     {
         return packets.stream()

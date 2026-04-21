@@ -46,11 +46,12 @@ public class DelayedStream
         this.debugLog = appInstance.getProperties().getPropertyBoolean(PROP_DELAYED_STREAM_DEBUG_LOG, debugLog);
         this.streamName = streamName;
         this.executor = executor;
-        // read standardized property first, fall back to legacy key 'added_stream_delay_in_ms'
+        // Prüfe, ob die Property 'added_stream_delay_in_ms' gesetzt ist
+        long delayInMs = appInstance.getProperties().getPropertyLong("added_stream_delay_in_ms", -1L);
+        logger.info(MODULE_NAME + "::" + CLASS_NAME + " [Init] added_stream_delay_in_ms=" + delayInMs);
         startTime = System.currentTimeMillis();
-        long legacy = appInstance.getProperties().getPropertyLong("added_stream_delay_in_ms", DEFAULT_START_DELAY);
-        startDelay = appInstance.getProperties().getPropertyLong(PROP_CAPTIONS_STREAM_DELAY, legacy);
-        logger.info(MODULE_NAME + "::" + CLASS_NAME + " [Init] startDelay=" + startDelay + " ms (legacy=" + legacy + ")");
+        startDelay = appInstance.getProperties().getPropertyLong(PROP_CAPTIONS_STREAM_DELAY, DEFAULT_START_DELAY);
+        logger.info(MODULE_NAME + "::" + CLASS_NAME + " [Init] startDelay=" + startDelay + " ms");
         executor.scheduleAtFixedRate(() -> processPackets(), 0, 75, TimeUnit.MILLISECONDS);
     }
 

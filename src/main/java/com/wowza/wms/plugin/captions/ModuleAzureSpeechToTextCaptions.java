@@ -122,13 +122,13 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                         try {
                             //smilname = customer_instance
                             //TODO: replace placeholder instance with mongo instance name 
-                            String instanceEvent = "01"; 
+                            String eventInstance = "01"; 
                             
 
                             for (String lang : enabled_languages) {
-                                String smilName = customer+ "_" + instanceEvent + "_" + lang;
-                                String baseSrc = instanceEvent + "_"+ lang + "_1080p";
-                                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages);
+                                String smilName = customer+ "_" + eventInstance + "_" + lang;
+                                String baseSrc = eventInstance + "_"+ lang + "_1080p";
+                                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages , eventInstance);
                                 logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
                             }
                         } catch (Exception e) {

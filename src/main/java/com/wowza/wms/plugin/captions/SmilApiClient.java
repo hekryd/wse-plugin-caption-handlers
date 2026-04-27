@@ -32,17 +32,6 @@ public class SmilApiClient {
         return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
-    private static String insertLangIntoSrc(String sampleSrc, String lang) {
-        if (sampleSrc == null) return lang == null ? "" : lang;
-        int idx = sampleSrc.indexOf('_');
-        String safeLang = lang == null ? "" : lang;
-        if (idx >= 0) {
-            // insert language after the first underscore: e.g. "01_1080p..." -> "01_de_1080p..."
-            return sampleSrc.substring(0, idx + 1) + safeLang + "_" + sampleSrc.substring(idx + 1);
-        }
-        // no underscore to split on, append language
-        return sampleSrc + "_" + safeLang;
-    }
 
     public static class SmilStream {
         public String systemLanguage;
@@ -109,7 +98,7 @@ public class SmilApiClient {
         return resp.body();
     }
 
-    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages) throws Exception {
+    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance) throws Exception {
         String appName = appInstance.getApplication().getName();
         String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
 
@@ -121,9 +110,8 @@ public class SmilApiClient {
         for (SmilStream s : streams) parts.add(s.toJson());
         // Add textstream entries for requested languages. Use first stream src as text src if available.
         if (languages != null && !languages.isEmpty()) {
-            String textSrc = streams != null && !streams.isEmpty() ? streams.get(0).src : smilName;
             for (String lang : languages) {
-                String textSrcWithLang = insertLangIntoSrc(textSrc, lang);
+                String textSrcWithLang = eventInstance + "_" + lang + "_1080p_delayed_1080p";
                 StringBuilder ts = new StringBuilder();
                 ts.append("{");
                 ts.append("\"systemLanguage\":\"").append(escape(lang)).append("\",");
@@ -176,7 +164,7 @@ public class SmilApiClient {
      * Convenience overload: generate standard video qualities and create SMIL.
      * Uses baseSrc as the naming base for generated stream src values.
      */
-    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, String baseSrc, List<String> languages) throws Exception {
+    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, String baseSrc, List<String> languages, String eventInstance) throws Exception {
         List<SmilStream> streams = new ArrayList<>();
         // exact qualities requested by user
         streams.add(new SmilStream(null, baseSrc + "_delayed_1080p", "4308000", "192000", "4308000", "1920", "1080"));
@@ -185,6 +173,6 @@ public class SmilApiClient {
         streams.add(new SmilStream(null, baseSrc + "_delayed_360p", "672000", "128000", "672000", "640", "360"));
         streams.add(new SmilStream(null, baseSrc + "_delayed_288p", "412000", "96000", "412000", "512", "288"));
         streams.add(new SmilStream(null, baseSrc + "_delayed_180p", "180000", "96000", "180000", "320", "180"));
-        return createSmilForApplication(appInstance, smilName, streams, languages);
+        return createSmilForApplication(appInstance, smilName, streams, languages, eventInstance);
     }
 }

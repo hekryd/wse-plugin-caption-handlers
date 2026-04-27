@@ -118,8 +118,24 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                         // also set timed text property for compatibility with existing code
                         appInstance.getTimedTextProperties().setProperty(PROP_DEFAULT_CAPTION_LANGUAGES, enabledCsv);
                         logger.info(MODULE_NAME + ".onAppStart set enabled_captions_csv: " + enabledCsv);
-                        // edit the smil file to include the enabled languages
-                        //log path first
+                        // create smil file with wowza streaming engine api
+                        try {
+                            //smilname = customer_instance
+                            //TODO: replace placeholder instance with mongo instance name 
+                            String instanceEvent = "01"; 
+                            
+
+                            for (String lang : enabled_languages) {
+                                String smilName = customer+ "_" + instanceEvent + "_" + lang;
+                                String baseSrc = instanceEvent + "_"+ lang + "_1080p";
+                                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages);
+                                logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
+                            }
+                        } catch (Exception e) {
+                            logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);
+                        }
+                       
+
                         
 
                     }
@@ -151,4 +167,18 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         stream.addClientListener(delayedStreamListener);
         stream.addLivePacketListener(delayedStreamListener);
     }
+    public void onAppStop(IApplicationInstance appInstance) throws Exception
+    {   
+        //SmilApiClient.deleteSmilForApplication(appInstance);
+        if (mongo != null) {
+            mongo.disconnect();
+            logger.info(MODULE_NAME + ".onAppStop MongoDB connection closed");
+        }
+        else {
+            logger.info(MODULE_NAME + ".onAppStop MongoDB connection was not initialized");
+        }
+        logger.info(MODULE_NAME + ".onAppStop completed");
+
+    }
+
 }

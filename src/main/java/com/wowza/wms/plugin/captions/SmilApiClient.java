@@ -127,38 +127,82 @@ public class SmilApiClient {
         sb.append(String.join(",", parts));
         sb.append("]}");
 
+        // Ensure any existing SMIL with this name is removed before creating a new one
+        try {
+            deleteSmilForApplication(appInstance, smilName);
+        } catch (Exception e) {
+            logger.warn("Failed to delete existing SMIL before create: " + smilName, e);
+        }
+
         String auth = readAuthHeader();
         logger.info("Posting SMIL to: " + url + " auth=" + (auth != null));
+        String resp = postJson(url, sb.toString(), auth);
         createdSmilFiles.add(smilName);
-        return postJson(url, sb.toString(), auth);
+        return resp;
     }
 
 
-    /*  TODO:finish
     public static String deleteSmilForApplication(IApplicationInstance appInstance) throws Exception {
         String appName = appInstance.getApplication().getName();
-        for (String smilName : createdSmilFiles) {
-            String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;
 
-            HttpRequest.Builder builder = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("Accept", "application/json")
-                    .DELETE();
-
-            String auth = readAuthHeader();
-            if (auth != null && !auth.isEmpty()) {
-                builder.header("Authorization", auth);
-            }
-
-            HttpRequest req = builder.build();
-            HttpResponse<String> resp = CLIENT.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            logger.info("Deleted SMIL: " + smilName + " response: " + resp.body());
+        if (createdSmilFiles.isEmpty()) {
+            logger.info("No SMIL files to delete for application: " + appName);
+            return "No SMIL files to delete.";
         }
-        createdSmilFiles.clear();
-        return "Deleted SMIL files: " + createdSmilFiles.toString();
+
+        List<String> deleted = new ArrayList<>();
+        for (String smilName : new ArrayList<>(createdSmilFiles)) {
+            try {
+                String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
+
+                HttpRequest.Builder builder = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .timeout(Duration.ofSeconds(15))
+                        .header("Accept", "application/json")
+                        .DELETE();
+
+                String auth = readAuthHeader();
+                if (auth != null && !auth.isEmpty()) {
+                    builder.header("Authorization", auth);
+                }
+
+                HttpRequest req = builder.build();
+                HttpResponse<String> resp = CLIENT.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                logger.info("Deleted SMIL: " + smilName + " response: " + resp.body());
+                deleted.add(smilName);
+            } catch (Exception e) {
+                logger.error("Failed to delete SMIL: " + smilName, e);
+            }
+        }
+
+        createdSmilFiles.removeAll(deleted);
+        return "Deleted SMIL files: " + deleted.toString();
     }
-  */
+
+    /**
+     * Delete a single SMIL file for the given application (used before creating a new one).
+     */
+    public static String deleteSmilForApplication(IApplicationInstance appInstance, String smilName) throws Exception {
+        String appName = appInstance.getApplication().getName();
+        String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
+
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(15))
+                .header("Accept", "application/json")
+                .DELETE();
+
+        String auth = readAuthHeader();
+        if (auth != null && !auth.isEmpty()) {
+            builder.header("Authorization", auth);
+        }
+
+        HttpRequest req = builder.build();
+        HttpResponse<String> resp = CLIENT.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        logger.info("Deleted SMIL: " + smilName + " response: " + resp.body());
+        createdSmilFiles.remove(smilName);
+        return resp.body();
+    }
 
 /**
      * Convenience overload: generate standard video qualities and create SMIL.

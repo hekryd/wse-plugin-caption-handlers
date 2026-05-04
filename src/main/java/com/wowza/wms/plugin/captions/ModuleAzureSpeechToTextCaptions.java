@@ -122,7 +122,6 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                         // create smil file with wowza streaming engine api
 
                         showCaptionsInEvent = captionConfig.getBoolean("show_captions_in_event", showCaptionsInEvent);
-                        if(showCaptionsInEvent){
                             try {
                             //smilname = customer_instance
                             //TODO: replace placeholder instance with mongo instance name 
@@ -130,13 +129,13 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                                 for (String lang : enabled_languages) {
                                     String smilName = customer+ "_" + eventInstance + "_" + lang;
                                     String baseSrc = eventInstance + "_"+ lang + "_1080p";
-                                    String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages , eventInstance);
+                                    String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages , eventInstance,showCaptionsInEvent);
                                     logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
                                 }
                             } catch (Exception e) {
                                 logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);
                             }
-                        }
+                        
                     }
                 }
                 break;

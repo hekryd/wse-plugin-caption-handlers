@@ -59,6 +59,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private boolean enabled = false;
     private int added_stream_delay_in_ms = 30000;
     private List<String> enabled_languages =  Arrays.asList("de","en"); 
+    private boolean showCaptionsInEvent = false;
 
     public void onAppCreate(IApplicationInstance appInstance)
     {
@@ -119,25 +120,23 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                         appInstance.getTimedTextProperties().setProperty(PROP_DEFAULT_CAPTION_LANGUAGES, enabledCsv);
                         logger.info(MODULE_NAME + ".onAppStart set enabled_captions_csv: " + enabledCsv);
                         // create smil file with wowza streaming engine api
-                        try {
+
+                        showCaptionsInEvent = captionConfig.getBoolean("show_captions_in_event", showCaptionsInEvent);
+                        if(showCaptionsInEvent){
+                            try {
                             //smilname = customer_instance
                             //TODO: replace placeholder instance with mongo instance name 
                             String eventInstance = "01"; 
-                            
-
-                            for (String lang : enabled_languages) {
-                                String smilName = customer+ "_" + eventInstance + "_" + lang;
-                                String baseSrc = eventInstance + "_"+ lang + "_1080p";
-                                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages , eventInstance);
-                                logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
+                                for (String lang : enabled_languages) {
+                                    String smilName = customer+ "_" + eventInstance + "_" + lang;
+                                    String baseSrc = eventInstance + "_"+ lang + "_1080p";
+                                    String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages , eventInstance);
+                                    logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
+                                }
+                            } catch (Exception e) {
+                                logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);
                             }
-                        } catch (Exception e) {
-                            logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);
                         }
-                       
-
-                        
-
                     }
                 }
                 break;

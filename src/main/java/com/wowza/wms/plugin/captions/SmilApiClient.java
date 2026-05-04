@@ -98,7 +98,7 @@ public class SmilApiClient {
         return resp.body();
     }
 
-    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent) throws Exception {
+    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
         String appName = appInstance.getApplication().getName();
         String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
 
@@ -111,7 +111,7 @@ public class SmilApiClient {
         // Add textstream entries for requested languages. Use first stream src as text src if available.
         if (languages != null && !languages.isEmpty() && showCaptionsInEvent) {
             for (String lang : languages) {
-                String textSrcWithLang = eventInstance + "_" + lang + "_1080p_delayed_1080p";
+                String textSrcWithLang = eventInstance + "_" + smilLanguage + "_1080p_delayed_1080p";
                 StringBuilder ts = new StringBuilder();
                 ts.append("{");
                 ts.append("\"systemLanguage\":\"").append(escape(lang)).append("\",");
@@ -208,7 +208,7 @@ public class SmilApiClient {
      * Convenience overload: generate standard video qualities and create SMIL.
      * Uses baseSrc as the naming base for generated stream src values.
      */
-    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, String baseSrc, List<String> languages, String eventInstance, boolean showCaptionsInEvent) throws Exception {
+    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, String baseSrc, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
         List<SmilStream> streams = new ArrayList<>();
         // exact qualities requested by user
         streams.add(new SmilStream(null, baseSrc + "_delayed_1080p", "4308000", "192000", "4308000", "1920", "1080"));
@@ -217,6 +217,6 @@ public class SmilApiClient {
         streams.add(new SmilStream(null, baseSrc + "_delayed_360p", "672000", "128000", "672000", "640", "360"));
         streams.add(new SmilStream(null, baseSrc + "_delayed_288p", "412000", "96000", "412000", "512", "288"));
         streams.add(new SmilStream(null, baseSrc + "_delayed_180p", "180000", "96000", "180000", "320", "180"));
-        return createSmilForApplication(appInstance, smilName, streams, languages, eventInstance, showCaptionsInEvent);
+        return createSmilForApplication(appInstance, smilName, streams, languages, eventInstance, showCaptionsInEvent,smilLanguage);
     }
 }

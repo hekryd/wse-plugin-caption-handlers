@@ -98,48 +98,73 @@ public class SmilApiClient {
         return resp.body();
     }
 
-    public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
-        String appName = appInstance.getApplication().getName();
-        String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
+public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
+    String appName = appInstance.getApplication().getName();
+    String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
 
-        StringBuilder sb = new StringBuilder();
-        sb.append('{');
-        sb.append("\"restURI\":\"").append(url).append("\",");
-        sb.append("\"smilStreams\":[");
-        List<String> parts = new ArrayList<>();
-        for (SmilStream s : streams) parts.add(s.toJson());
-        // Add textstream entries for requested languages. Use first stream src as text src if available.
-        if (languages != null && !languages.isEmpty() && showCaptionsInEvent) {
-            for (String lang : languages) {
-                String textSrcWithLang = eventInstance + "_" + smilLanguage + "_1080p_delayed_1080p";
-                StringBuilder ts = new StringBuilder();
-                ts.append("{");
-                ts.append("\"systemLanguage\":\"").append(escape(lang)).append("\",");
-                ts.append("\"src\":\"").append(escape(textSrcWithLang)).append("\",");
-                ts.append("\"type\":\"textstream\",");
-                ts.append("\"params\":[");
-                ts.append("{\"name\":\"isWowzaCaptionStream\",\"value\":\"TRUE\",\"valuetype\":\"data\"},");
-                ts.append("{\"name\":\"wowzaCaptionIngestType\",\"value\":\"onTextData events in live streams\",\"valuetype\":\"data\"}");
-                ts.append("]}");
-                parts.add(ts.toString());
-            }
-        }
-        sb.append(String.join(",", parts));
-        sb.append("]}");
-
-        // Ensure any existing SMIL with this name is removed before creating a new one
-        try {
-            deleteSmilForApplication(appInstance, smilName);
-        } catch (Exception e) {
-            logger.warn("Failed to delete existing SMIL before create: " + smilName, e);
-        }
-
-        String auth = readAuthHeader();
-        logger.info("Posting SMIL to: " + url + " auth=" + (auth != null));
-        String resp = postJson(url, sb.toString(), auth);
-        createdSmilFiles.add(smilName);
-        return resp;
+    StringBuilder sb = new StringBuilder();
+    sb.append("{");
+    // Root required fields
+    sb.append("\"name\":\"").append(smilName).append("\",");
+    sb.append("\"title\":\"").append(smilName).append("\",");
+    sb.append("\"serverName\":\"_defaultServer_\",");
+    
+    sb.append("\"smilStreams\":[");
+    List<String> parts = new ArrayList<>();
+    
+    // Add existing video/audio streams
+    for (SmilStream s : streams) {
+        parts.add(s.toJson());
     }
+
+    // Add textstream entries for requested languages
+    if (languages != null && !languages.isEmpty() && showCaptionsInEvent) {
+        int index = streams.size();
+        for (String lang : languages) {
+            String textSrcWithLang = eventInstance + "_" + smilLanguage + "_1080p_delayed_1080p";
+            StringBuilder ts = new StringBuilder();
+            ts.append("{");
+            ts.append("\"systemLanguage\":\"").append(escape(lang)).append("\",");
+            ts.append("\"src\":\"").append(escape(textSrcWithLang)).append("\",");
+            ts.append("\"type\":\"textstream\",");
+            // Move caption fields to top-level properties
+            ts.append("\"isWowzaCaptionStream\":\"true\",");
+
+            ts.append("\"wowzaCaptionIngestType\":\"onTextData events in live streams\",");
+            // Add other required API fields
+            ts.append("\"dur\":\"\",");
+            ts.append("\"ngrp\":\"\",");
+            ts.append("\"keyFrameOnly\":\"false\",");
+            ts.append("\"systemBitrate\":\"0\",");
+            ts.append("\"videoCodecId\":\"\",");
+            ts.append("\"version\":\"\",");
+            ts.append("\"audioBitrate\":\"0\",");
+            ts.append("\"audioCodecId\":\"\",");
+            ts.append("\"videoBitrate\":\"0\",");
+            ts.append("\"videoOnly\":\"false\",");
+            ts.append("\"audioOnly\":\"false\",");
+            ts.append("\"width\":\"0\",");
+            ts.append("\"height\":\"0\",");
+            ts.append("\"idx\":").append(index++).append(",");
+            ts.append("\"begin\":\"\",");
+            ts.append("\"title\":\"\"");
+            ts.append("}");
+            parts.add(ts.toString());
+        }
+    }
+    
+    sb.append(String.join(",", parts));
+    sb.append("]}");
+
+    try {
+        deleteSmilForApplication(appInstance, smilName);
+    } catch (Exception e) {
+        logger.warn("Failed to delete existing SMIL before create: " + smilName, e);
+    }
+
+    String auth = readAuthHeader();
+    return postJson(url, sb.toString(), auth);
+}
 
 
     public static String deleteSmilForApplication(IApplicationInstance appInstance) throws Exception {

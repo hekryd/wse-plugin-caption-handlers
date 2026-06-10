@@ -138,40 +138,50 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
 
             String eventColl = eventCollection;
             if (eventColl == null) {
-                // Try to find event collection that contains this stream
-                for (String collName : mongo.getDatabase().listCollectionNames()) {
-                    try {
-                        org.bson.Document eventConfig = mongo.getDatabase().getCollection(collName)
-                            .find(new org.bson.Document("_id", "event_config")).first();
-                        if (eventConfig != null && eventConfig.toJson().contains(streamName)) {
-                            eventColl = collName;
-                            break;
-                        }
-                    } catch (Exception ignore) {}
-                }
+                // Prefer the single-collection layout
+                try {
+                    var names = mongo.getDatabase().listCollectionNames().into(new java.util.ArrayList<>());
+                    if (names.contains("events")) eventColl = "events";
+                } catch (Exception ignore) {}
             }
 
+            org.bson.Document foundEvent = null;
             if (eventColl != null) {
-                org.bson.Document languageConfig = mongo.getDatabase().getCollection(eventColl)
-                    .find(new org.bson.Document("_id", "language_config")).first();
-                if (languageConfig != null && languageConfig.containsKey("lang")) {
-                    Object langObj = languageConfig.get("lang");
-                    if (langObj instanceof java.util.List) {
-                        java.util.List<?> list = (java.util.List<?>) langObj;
-                        if (!list.isEmpty()) {
-                            Object first = list.get(0);
-                            String detectedLanguageKey = null;
-                            if (first instanceof org.bson.Document) {
-                                detectedLanguageKey = ((org.bson.Document) first).getString("language_key");
-                            } else if (first instanceof java.util.Map) {
-                                Object k = ((java.util.Map<?, ?>) first).get("language_key");
-                                if (k != null)
-                                    detectedLanguageKey = k.toString();
+                try {
+                    var coll = mongo.getDatabase().getCollection(eventColl);
+                    for (org.bson.Document doc : coll.find()) {
+                        try {
+                            org.bson.Document streamDoc = doc.get("stream", org.bson.Document.class);
+                            String instancePart = null;
+                            try {
+                                String[] parts = streamName.split("_");
+                                if (parts.length > 0) instancePart = parts[0];
+                            } catch (Exception ignore) {}
+                            if (streamDoc != null && instancePart != null && streamDoc.containsKey("instance") && instancePart.equals(streamDoc.getString("instance"))) {
+                                foundEvent = doc;
+                                break;
                             }
-                            return streamLanguage.equals(detectedLanguageKey);
-                        }
+
+                            if (streamLanguage != null && doc.containsKey("languages")) {
+                                org.bson.Document languages = doc.get("languages", org.bson.Document.class);
+                                if (languages != null && languages.containsKey(streamLanguage)) {
+                                    foundEvent = doc;
+                                    break;
+                                }
+                            }
+                        } catch (Exception ignore) {}
                     }
-                }
+                } catch (Exception ignore) {}
+            }
+
+            if (foundEvent != null && foundEvent.containsKey("languages")) {
+                try {
+                    org.bson.Document languages = foundEvent.get("languages", org.bson.Document.class);
+                    if (languages != null && !languages.isEmpty()) {
+                        String detectedLanguageKey = languages.keySet().iterator().next();
+                        return streamLanguage.equals(detectedLanguageKey);
+                    }
+                } catch (Exception ignore) {}
             }
         } catch (Exception e) {
             // Log error but default to true to not break existing functionality

@@ -83,63 +83,57 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         //logger.error(MODULE_NAME + ".onAppStart initializing MongoDB connection");
         customer = appInstance.getApplication().getName().split("_")[0];
 
-        mongo = new Mongo("Events_" + customer);
+        // New Mongo layout: database is Customer_<customer>, collection is always "events"
+        mongo = new Mongo("Customer_" + customer);
         if (mongo == null)
             logger.error(MODULE_NAME + ".onAppStart could not initialize MongoDB connection");
         mongo.connect();
-         //logger.error(MODULE_NAME + ".onAppStart MongoDB connection initialized");
 
-         // log a test query to verify connection
-        List<String> collections = mongo.getDatabase().listCollectionNames().into(new ArrayList<>());
-        //logger.error(MODULE_NAME + ".onAppStart MongoDB collections: " + collections.toString());
-        //reverse the collections list
-        collections.sort(Comparator.reverseOrder());
-        //go in every collection in the list in asc order and get the document with the _id "event_config" and check if phase is "live" if found stop and log the event name
-        for (String collectionName : collections) {
-            Document eventConfig = mongo.getDatabase().getCollection(collectionName).find(new Document("_id", "event_config")).first();
-            if (eventConfig != null && eventConfig.getBoolean("nextEventToBeCaptioned", false)) {
-               // logger.error(MODULE_NAME + ".onAppStart Found live event: " + collectionName);
-                liveEventCollection = collectionName;
-                Document captionConfig = eventConfig.get("caption_config", Document.class);
-                //log caption config
-                //logger.info(MODULE_NAME + ".onAppStart captionConfig: " + captionConfig);
-                    appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
+        // Find the first event document in the "events" collection that is marked for captioning
+        try {
+            String eventsColl = "events";
+            Document eventDoc = mongo.getDatabase().getCollection(eventsColl)
+                    .find(new Document("captions.nextEventToBeCaptioned", true)).first();
+            if (eventDoc != null) {
+                liveEventCollection = eventsColl;
+                Document captionConfig = eventDoc.get("captions", Document.class);
+                appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
                 if (captionConfig != null) {
                     enabled = captionConfig.getBoolean("enabled", enabled);
-                    added_stream_delay_in_ms = captionConfig.getInteger("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                    //logger.info(MODULE_NAME + ".onAppStart set added_stream_delay_in_ms property: " + added_stream_delay_in_ms);
-                    
-                    //logger.info(MODULE_NAME + ".onAppStart enabled_languages default: " + enabled_languages);
-                    enabled_languages = captionConfig.getList("enabled_captions", String.class);
-                    //logger.info(MODULE_NAME + ".onAppStart enabled_languages updated: " + enabled_languages);
-                    // make enabled languages available to other components (CSV)
+                    // map new naming: addedDelayForTranscriptionProcess -> added_stream_delay_in_ms
+                    added_stream_delay_in_ms = captionConfig.getInteger("addedDelayForTranscriptionProcess", added_stream_delay_in_ms);
+
+                    enabled_languages = captionConfig.getList("enabledLanguages", String.class);
                     if (enabled_languages != null && !enabled_languages.isEmpty()) {
                         String enabledCsv = String.join(",", enabled_languages);
                         appInstance.getProperties().setProperty("enabled_captions_csv", enabledCsv);
-                        // also set timed text property for compatibility with existing code
                         appInstance.getTimedTextProperties().setProperty(PROP_DEFAULT_CAPTION_LANGUAGES, enabledCsv);
                         logger.info(MODULE_NAME + ".onAppStart set enabled_captions_csv: " + enabledCsv);
-                        // create smil file with wowza streaming engine api
 
-                        showCaptionsInEvent = captionConfig.getBoolean("show_captions_in_event", showCaptionsInEvent);
+                        showCaptionsInEvent = captionConfig.getBoolean("enabledForEventPage", showCaptionsInEvent);
+                        try {
+                            String eventInstance = "01";
+                            // try to infer instance from event document stream block if present
                             try {
-                            //smilname = customer_instance
-                            //TODO: replace placeholder instance with mongo instance name 
-                            String eventInstance = "01"; 
-                                for (String lang : enabled_languages) {
-                                    String smilName = customer+ "_" + eventInstance + "_" + lang;
-                                    String baseSrc = eventInstance + "_"+ lang + "_1080p";
-                                    String resp = SmilApiClient.createSmilForApplication(appInstance, smilName,baseSrc, enabled_languages , eventInstance,showCaptionsInEvent, lang);
-                                    logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
-                                }
-                            } catch (Exception e) {
-                                logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);
+                                Document streamDoc = eventDoc.get("stream", Document.class);
+                                if (streamDoc != null && streamDoc.containsKey("instance"))
+                                    eventInstance = streamDoc.getString("instance");
+                            } catch (Exception ignore) {}
+
+                            for (String lang : enabled_languages) {
+                                String smilName = customer + "_" + eventInstance + "_" + lang;
+                                String baseSrc = eventInstance + "_" + lang + "_1080p";
+                                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName, baseSrc, enabled_languages, eventInstance, showCaptionsInEvent, lang);
+                                logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
                             }
-                        
+                        } catch (Exception e) {
+                            logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);
+                        }
                     }
                 }
-                break;
             }
+        } catch (Exception e) {
+            logger.error(MODULE_NAME + ".onAppStart MongoDB query failed", e);
         }
 
         if (!enabled)

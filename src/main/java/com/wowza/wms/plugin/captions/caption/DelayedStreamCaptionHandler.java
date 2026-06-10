@@ -156,33 +156,55 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             if (this.mongo != null && this.mongo.getDatabase() != null) {
                 try {
                     String eventColl = this.eventCollectionName != null ? this.eventCollectionName : resolveEventCollectionForStream();
-                    Document languageConfig = this.mongo.getDatabase().getCollection(eventColl).find(new Document("_id", "language_config")).first();
-                    if (languageConfig != null) {
-                        String detectedLanguageKey = null;
-                        try {
-                            if (languageConfig.containsKey("lang")) {
-                                Object langObj = languageConfig.get("lang");
-                                if (langObj instanceof java.util.List) {
-                                    java.util.List<?> list = (java.util.List<?>) langObj;
-                                    if (!list.isEmpty()) {
-                                        Object first = list.get(0);
-                                        if (first instanceof org.bson.Document) {
-                                            detectedLanguageKey = ((org.bson.Document) first).getString("language_key");
-                                        } else if (first instanceof java.util.Map) {
-                                            Object k = ((java.util.Map<?, ?>) first).get("language_key");
-                                            if (k != null)
-                                                detectedLanguageKey = k.toString();
-                                        }
+
+                    // New schema: single "events" collection with event documents containing a top-level
+                    // "languages" sub-document. Try to locate the event document for this stream and
+                    // derive the first language key as the main language.
+                    org.bson.Document foundEvent = null;
+                    try {
+                        var coll = this.mongo.getDatabase().getCollection(eventColl);
+                        for (org.bson.Document doc : coll.find()) {
+                            try {
+                                // Match by stream.instance when possible
+                                org.bson.Document streamDoc = doc.get("stream", org.bson.Document.class);
+                                if (streamDoc != null && streamLanguage != null) {
+                                    String instancePart = null;
+                                    try {
+                                        String[] parts = streamName.split("_");
+                                        if (parts.length > 0) instancePart = parts[0];
+                                    } catch (Exception ignore) {}
+                                    if (instancePart != null && streamDoc.containsKey("instance") && instancePart.equals(streamDoc.getString("instance"))) {
+                                        foundEvent = doc;
+                                        break;
                                     }
                                 }
+
+                                // Fallback: check if the languages object contains the stream language key
+                                if (streamLanguage != null && doc.containsKey("languages")) {
+                                    org.bson.Document languages = doc.get("languages", org.bson.Document.class);
+                                    if (languages != null && languages.containsKey(streamLanguage)) {
+                                        foundEvent = doc;
+                                        break;
+                                    }
+                                }
+                            } catch (Exception ignore) {}
+                        }
+                    } catch (Exception ignore) {}
+
+                    String detectedLanguageKey = null;
+                    if (foundEvent != null && foundEvent.containsKey("languages")) {
+                        try {
+                            org.bson.Document languages = foundEvent.get("languages", org.bson.Document.class);
+                            if (languages != null && !languages.isEmpty()) {
+                                detectedLanguageKey = languages.keySet().iterator().next();
                             }
                         } catch (Exception e) {
-                            logger.error(CLASS_NAME + ".detectMainStream: languageConfig parsing error", e);
+                            logger.error(CLASS_NAME + ".detectMainStream: languages parsing error", e);
                         }
-                        this.isMainStream = (detectedLanguageKey != null && streamLanguage != null && streamLanguage.equals(detectedLanguageKey));
-                        // FIX #8: was logger.error for a non-error informational message
-                        logger.info(CLASS_NAME + ".detectMainStream: firstLanguageKey=" + detectedLanguageKey + " mainStream=" + this.isMainStream);
                     }
+
+                    this.isMainStream = (detectedLanguageKey != null && streamLanguage != null && streamLanguage.equals(detectedLanguageKey));
+                    logger.info(CLASS_NAME + ".detectMainStream: firstLanguageKey=" + detectedLanguageKey + " mainStream=" + this.isMainStream);
                 } catch (Exception e) {
                     logger.error(CLASS_NAME + ".detectMainStream: language detection failed: " + e.getMessage(), e);
                 }
@@ -553,6 +575,12 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
         try {
             var eventsDb = mongo.getDatabase();
+            // Prefer the new single-collection layout
+            try {
+                var names = eventsDb.listCollectionNames().into(new java.util.ArrayList<>());
+                if (names.contains("events")) return "events";
+            } catch (Exception ignore) {}
+
             for (String collName : eventsDb.listCollectionNames()) {
                 try {
                     Document eventConfig = eventsDb.getCollection(collName).find(new Document("_id", "event_config")).first();

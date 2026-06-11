@@ -17,7 +17,7 @@ public class WhisperCaptionsTranscoderActionListener extends AudioResamplingTran
 {
     public WhisperCaptionsTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> speechHandlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection)
     {
-        super(appInstance, speechHandlers, delayedStreams, mongo, eventCollection);
+        super(appInstance, speechHandlers, delayedStreams, mongo, eventCollection,null);
     }
 
     @Override

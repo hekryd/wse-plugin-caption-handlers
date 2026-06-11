@@ -19,9 +19,9 @@ public class AzureCaptionsTranscoderActionListener extends AudioResamplingTransc
     private final String serviceRegion;
 
     public AzureCaptionsTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams,
-                                                 String subscriptionKey, String serviceRegion, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection)
+                                                 String subscriptionKey, String serviceRegion, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection, String eventKey)
     {
-        super(appInstance, handlers, delayedStreams, mongo, eventCollection);
+        super(appInstance, handlers, delayedStreams, mongo, eventCollection, eventKey);
         this.subscriptionKey = subscriptionKey;
         this.serviceRegion = serviceRegion;
     }

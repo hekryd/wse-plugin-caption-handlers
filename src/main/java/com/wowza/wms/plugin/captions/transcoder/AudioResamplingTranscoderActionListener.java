@@ -34,6 +34,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
     private final Map<String, DelayedStream> delayedStreams;
     private final com.wowza.wms.plugin.captions.mongo.Mongo mongo;
     private final String eventCollection;
+    private final String eventKey;
 
     private static final Path resampleTemplate;
 
@@ -50,13 +51,14 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         }
     }
 
-    public AudioResamplingTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection)
+    public AudioResamplingTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection, String eventKey)
     {
         this.appInstance = appInstance;
         this.handlers = handlers;
         this.delayedStreams = delayedStreams;
         this.mongo = mongo;
         this.eventCollection = eventCollection;
+        this.eventKey = eventKey;
     }
 
     @Override
@@ -84,7 +86,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             {
                 DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
                         name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
-                CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo, eventCollection);
+                CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo, eventCollection, eventKey);
 
             // Only create speech handler for main stream
             if (!isMainStream) {

@@ -57,6 +57,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private final Mongo mongo;
     private final String streamName;
     private final String eventCollectionName;
+    private final String eventKey;
     private boolean isMainStream = false;
 
     private int wordsPerMinute = DEFAULT_WORDS_PER_MINUTE;
@@ -100,7 +101,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     );
 
     // FIX #4: Private constructor — use static factory to separate init from thread/DB work
-    private DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName)
+    private DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey)
     {
         this.delayedStream = delayedStream;
         logger = WMSLoggerFactory.getLoggerObj(DelayedStreamCaptionHandler.class, appInstance);
@@ -108,6 +109,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         this.streamName = streamName;
         this.mongo = mongo;
         this.eventCollectionName = eventCollectionName;
+        this.eventKey = eventKey;
         this.watcherExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "CaptionChangeWatcher-" + streamName));
     }
 
@@ -116,9 +118,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
      * Throws IllegalStateException on failure so callers cannot accidentally use a null
      * reference. Resources are always cleaned up before the exception propagates.
      */
-    public static DelayedStreamCaptionHandler create(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName)
+    public static DelayedStreamCaptionHandler create(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey)
     {
-        DelayedStreamCaptionHandler handler = new DelayedStreamCaptionHandler(appInstance, delayedStream, streamName, mongo, eventCollectionName);
+        DelayedStreamCaptionHandler handler = new DelayedStreamCaptionHandler(appInstance, delayedStream, streamName, mongo, eventCollectionName, eventKey );
         try {
             handler.init();
         } catch (Exception e) {
@@ -298,7 +300,6 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             try {
                 logger.info(CLASS_NAME + ".handleCaption: main stream found, persisting caption to MongoDB");
                 String captionsDbName = resolveCaptionsDbName();
-                String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
 
                 long systemTime = System.currentTimeMillis();
                 // Deterministic pairing id so captions from different languages that
@@ -321,7 +322,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     .append("publishTime", new Date(delayedStream.estimatedPublishTimeMillis(publishMillis)))
                     .append("createdAt", new Date());
 
-                InsertOneResult res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection).insertOne(doc);
+                InsertOneResult res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventKey).insertOne(doc);
                 if (res != null && res.getInsertedId() != null) {
                     ObjectId id = res.getInsertedId().asObjectId().getValue();
                     long absTime = startOffset + captionOffset;
@@ -331,9 +332,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     slot.captions.add(new PendingCaption(id, System.currentTimeMillis()));
 
                     if (debugLog)
-                        logger.info(CLASS_NAME + ".handleCaption: persisted caption id=" + id + " absTime=" + absTime + " DB=" + captionsDbName + " coll=" + eventCollection);
+                        logger.info(CLASS_NAME + ".handleCaption: persisted caption id=" + id + " absTime=" + absTime + " DB=" + captionsDbName + " coll=" + eventKey);
                 } else {
-                    logger.info(CLASS_NAME + ".handleCaption: persisted caption to MongoDB DB=" + captionsDbName + " collection=" + eventCollection);
+                    logger.info(CLASS_NAME + ".handleCaption: persisted caption to MongoDB DB=" + captionsDbName + " collection=" + eventKey);
                 }
             } catch (Exception e) {
                 logger.error(CLASS_NAME + ".handleCaption: failed to persist caption: " + e.getMessage(), e);

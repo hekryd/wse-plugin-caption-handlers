@@ -54,6 +54,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private Mongo mongo;
     private String customer;
     private String liveEventCollection;
+    private String eventKey;
 
     //event_config
     private boolean enabled = false;
@@ -96,6 +97,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                     .find(new Document("captions.nextEventToBeCaptioned", true)).first();
             if (eventDoc != null) {
                 liveEventCollection = eventsColl;
+                eventKey = eventDoc.getString("eventKey");
                 Document captionConfig = eventDoc.get("captions", Document.class);
                 appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
                 if (captionConfig != null) {
@@ -142,7 +144,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         {
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
                 appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
-                    subscriptionKey, serviceRegion, mongo, liveEventCollection)));
+                    subscriptionKey, serviceRegion, mongo, liveEventCollection, eventKey)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }

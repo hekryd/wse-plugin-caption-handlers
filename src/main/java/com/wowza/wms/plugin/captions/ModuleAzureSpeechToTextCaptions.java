@@ -142,9 +142,28 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
             return;
         try
         {
+            // determine event startAt (if available) and pass as millis to listeners
+            Long eventStartAtMillis = null;
+            try {
+                if (liveEventCollection != null && mongo != null && mongo.getDatabase() != null) {
+                    Document eventDoc = mongo.getDatabase().getCollection(liveEventCollection)
+                            .find(new Document("captions.nextEventToBeCaptioned", true)).first();
+                    if (eventDoc == null) eventDoc = mongo.getDatabase().getCollection(liveEventCollection).find().first();
+                    if (eventDoc != null) {
+                        Object startAtValue = null;
+                        if (eventDoc.containsKey("startAt")) startAtValue = eventDoc.get("startAt");
+                        if (startAtValue instanceof Date) eventStartAtMillis = ((Date) startAtValue).getTime();
+                        else if (startAtValue instanceof Number) eventStartAtMillis = ((Number) startAtValue).longValue();
+                        else if (startAtValue instanceof String) {
+                            try { eventStartAtMillis = java.time.Instant.parse((String) startAtValue).toEpochMilli(); } catch (Exception ignore) {}
+                        }
+                    }
+                }
+            } catch (Exception ignore) {}
+
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
                 appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
-                    subscriptionKey, serviceRegion, mongo, liveEventCollection, eventKey)));
+                    subscriptionKey, serviceRegion, mongo, liveEventCollection, eventKey, eventStartAtMillis)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }

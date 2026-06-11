@@ -35,6 +35,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
     private final com.wowza.wms.plugin.captions.mongo.Mongo mongo;
     private final String eventCollection;
     private final String eventKey;
+    private final Long eventStartAtMillis;
 
     private static final Path resampleTemplate;
 
@@ -51,7 +52,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         }
     }
 
-    public AudioResamplingTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection, String eventKey)
+    public AudioResamplingTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection, String eventKey, Long eventStartAtMillis)
     {
         this.appInstance = appInstance;
         this.handlers = handlers;
@@ -59,6 +60,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         this.mongo = mongo;
         this.eventCollection = eventCollection;
         this.eventKey = eventKey;
+        this.eventStartAtMillis = eventStartAtMillis;
     }
 
     @Override
@@ -86,7 +88,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             {
                 DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
                         name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
-                CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo, eventCollection, eventKey);
+                CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo, eventCollection, eventKey, eventStartAtMillis);
 
             // Only create speech handler for main stream
             if (!isMainStream) {

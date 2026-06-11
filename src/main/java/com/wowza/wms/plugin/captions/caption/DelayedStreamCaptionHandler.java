@@ -58,6 +58,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private final String streamName;
     private final String eventCollectionName;
     private final String eventKey;
+    private final Long eventStartAtMillis;
     private boolean isMainStream = false;
 
     private int wordsPerMinute = DEFAULT_WORDS_PER_MINUTE;
@@ -101,7 +102,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     );
 
     // FIX #4: Private constructor — use static factory to separate init from thread/DB work
-    private DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey)
+    private DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey,Long eventStartAtMillis)
     {
         this.delayedStream = delayedStream;
         logger = WMSLoggerFactory.getLoggerObj(DelayedStreamCaptionHandler.class, appInstance);
@@ -110,6 +111,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         this.mongo = mongo;
         this.eventCollectionName = eventCollectionName;
         this.eventKey = eventKey;
+        this.eventStartAtMillis = eventStartAtMillis;
         this.watcherExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "CaptionChangeWatcher-" + streamName));
     }
 
@@ -118,9 +120,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
      * Throws IllegalStateException on failure so callers cannot accidentally use a null
      * reference. Resources are always cleaned up before the exception propagates.
      */
-    public static DelayedStreamCaptionHandler create(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey)
+    public static DelayedStreamCaptionHandler create(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey,Long eventStartAtMillis)
     {
-        DelayedStreamCaptionHandler handler = new DelayedStreamCaptionHandler(appInstance, delayedStream, streamName, mongo, eventCollectionName, eventKey );
+        DelayedStreamCaptionHandler handler = new DelayedStreamCaptionHandler(appInstance, delayedStream, streamName, mongo, eventCollectionName, eventKey, eventStartAtMillis);
         try {
             handler.init();
         } catch (Exception e) {
@@ -322,7 +324,51 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     .append("publishTime", new Date(delayedStream.estimatedPublishTimeMillis(publishMillis)))
                     .append("createdAt", new Date());
 
-                InsertOneResult res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventKey).insertOne(doc);
+                // Only persist captions if the event's startAt is in the past (event already started)
+                boolean shouldPersist = true;
+                long now = System.currentTimeMillis();
+                try {
+                    if (this.eventStartAtMillis != null) {
+                        if (this.eventStartAtMillis > now) {
+                            shouldPersist = false;
+                            if (debugLog) logger.info(CLASS_NAME + ".handleCaption: event startAt (passed) is in the future (" + new Date(this.eventStartAtMillis) + ") - skipping DB persist");
+                        }
+                    } else {
+                        var eventsDb = mongo.getDatabase();
+                        if (eventsDb != null) {
+                            var evtColl = eventsDb.getCollection(eventKey);
+                            Document eventDoc = evtColl.find().first();
+                            if (eventDoc != null) {
+                                Date startAtDate = null;
+                                if (eventDoc.containsKey("startAt")) {
+                                    Object startAtValue = eventDoc.get("startAt");
+                                    if (startAtValue instanceof Date) startAtDate = (Date) startAtValue;
+                                    else if (startAtValue instanceof Number) startAtDate = new Date(((Number) startAtValue).longValue());
+                                    else if (startAtValue instanceof String) {
+                                        try { startAtDate = Date.from(java.time.Instant.parse((String) startAtValue)); } catch (Exception ignore) {}
+                                    }
+                                }
+
+                                if (startAtDate != null) {
+                                    if (startAtDate.getTime() > now) {
+                                        shouldPersist = false;
+                                        if (debugLog) logger.info(CLASS_NAME + ".handleCaption: event startAt is in the future (" + startAtDate + ") - skipping DB persist");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.warn(CLASS_NAME + ".handleCaption: failed to resolve event startAt, defaulting to persist: " + e.getMessage());
+                }
+
+                InsertOneResult res = null;
+                if (shouldPersist) {
+                    res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventKey).insertOne(doc);
+                } else {
+                    if (debugLog) logger.info(CLASS_NAME + ".handleCaption: skipped persisting caption because event hasn't started");
+                }
+
                 if (res != null && res.getInsertedId() != null) {
                     ObjectId id = res.getInsertedId().asObjectId().getValue();
                     long absTime = startOffset + captionOffset;

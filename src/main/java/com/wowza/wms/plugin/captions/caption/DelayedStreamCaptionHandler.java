@@ -238,7 +238,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     ObjectId id = captionIdHolder[0];
 
                     String captionsDbName = resolveCaptionsDbName();
-                    String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
+                    String eventCollection = eventKey;
 
                     if (id != null) {
                         mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
@@ -417,7 +417,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         watcherFuture = watcherExecutor.submit(() -> {
             try {
                 String captionsDbName = resolveCaptionsDbName();
-                String eventCollection = eventCollectionName != null ? eventCollectionName : resolveEventCollectionForStream();
+                String eventCollection = eventKey;
                 MongoCollection<Document> coll = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection);
                 var changeStream = coll.watch().fullDocument(FullDocument.UPDATE_LOOKUP);
                 MongoCursor<ChangeStreamDocument<Document>> cursor = null;

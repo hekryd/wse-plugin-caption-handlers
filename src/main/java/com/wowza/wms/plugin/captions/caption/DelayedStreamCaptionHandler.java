@@ -298,7 +298,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             logger.info(CLASS_NAME + ".handleCaption: packet = " + packet + ", stream buffer: " + delayedStream.getFirstPacketTimecode() + " - " + delayedStream.getLastPacketTimecode());
         delayedStream.writePacket(packet);
 
-        if (mongo != null && mongo.getClient() != null && isMainStream) {
+        if (mongo != null && mongo.getClient() != null && isMainStream && caption.getText() != null && !caption.getText().isEmpty()) {
             try {
                 logger.info(CLASS_NAME + ".handleCaption: main stream found, persisting caption to MongoDB");
                 String captionsDbName = resolveCaptionsDbName();

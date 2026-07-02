@@ -106,7 +106,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                     enabled = captionConfig.getBoolean("enabled", enabled);
                     delay_for_editing = captionConfig.getInteger("addedDelayForEditing", delay_for_editing);
                     delay_for_transcription_process = captionConfig.getInteger("addedDelayForTranscriptionProcess", delay_for_transcription_process);
-                    added_stream_delay_in_ms = added_stream_delay_in_ms + delay_for_transcription_process;
+                    added_stream_delay_in_ms = delay_for_editing + delay_for_transcription_process;
                     
                     //not needed
                     //appInstance.getProperties().setProperty("delay_for_editing", delay_for_editing);  

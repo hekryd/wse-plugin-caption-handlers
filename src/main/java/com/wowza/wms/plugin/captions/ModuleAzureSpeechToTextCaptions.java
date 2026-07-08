@@ -55,10 +55,12 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private String customer;
     private String liveEventCollection;
     private String eventKey;
+    private int azureDelay = 12000;
+
 
     //event_config
     private boolean enabled = false;
-    private int added_stream_delay_in_ms = 30000;
+    private int added_stream_delay_in_ms = 0;
     private List<String> enabled_languages =  Arrays.asList("de","en"); 
     private boolean showCaptionsInEvent = false;
 
@@ -99,12 +101,12 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                 liveEventCollection = eventsColl;
                 eventKey = eventDoc.getString("eventKey");
                 Document captionConfig = eventDoc.get("captions", Document.class);
+                added_stream_delay_in_ms = captionConfig.getInteger("addedDelayForEditing", added_stream_delay_in_ms) + azureDelay;
                 appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
                 if (captionConfig != null) {
                     enabled = captionConfig.getBoolean("enabled", enabled);
 
                     // map new naming: addedDelayForTranscriptionProcess -> added_stream_delay_in_ms
-                    added_stream_delay_in_ms = captionConfig.getInteger("addedDelayForTranscriptionProcess", added_stream_delay_in_ms);
 
 
                     enabled_languages = captionConfig.getList("enabledLanguages", String.class);

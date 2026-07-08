@@ -99,8 +99,8 @@ public class SmilApiClient {
     }
 
 public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
-    String appName = appInstance.getApplication().getName();
-    String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
+    String appName = appInstance.getApplication().getName().replace("target", "playout");
+    String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;
 
     StringBuilder sb = new StringBuilder();
     sb.append("{");
@@ -121,7 +121,7 @@ public static String createSmilForApplication(IApplicationInstance appInstance, 
     if (languages != null && !languages.isEmpty() && showCaptionsInEvent) {
         int index = streams.size();
         for (String lang : languages) {
-            String textSrcWithLang = eventInstance + "_" + smilLanguage + "_1080p_delayed_1080p";
+            String textSrcWithLang = eventInstance + "_" + smilLanguage + "_delayed_1080p";
             StringBuilder ts = new StringBuilder();
             ts.append("{");
             ts.append("\"systemLanguage\":\"").append(escape(lang)).append("\",");

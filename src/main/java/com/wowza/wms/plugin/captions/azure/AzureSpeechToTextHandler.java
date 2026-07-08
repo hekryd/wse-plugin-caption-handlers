@@ -58,7 +58,7 @@ public class AzureSpeechToTextHandler implements SpeechHandler
         maxLines = props.getPropertyInt(PROP_MAX_CAPTION_LINE_COUNT, 2);
         this.captionHandler = captionHandler;
         
-      String instanceName = streamName; // e.g., "01_de_1080p"
+      String instanceName = streamName; // e.g., "01_de"
       String[] parts = instanceName.split("_");
 
       // default to en-US if nothing found

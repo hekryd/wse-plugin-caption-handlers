@@ -128,7 +128,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
                             for (String lang : enabled_languages) {
                                 String smilName = customer + "_" + eventInstance + "_" + lang;
-                                String baseSrc = eventInstance + "_" + lang + "_1080p";
+                                String baseSrc = eventInstance + "_" + lang;
                                 String resp = SmilApiClient.createSmilForApplication(appInstance, smilName, baseSrc, enabled_languages, eventInstance, showCaptionsInEvent, lang);
                                 logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
                             }

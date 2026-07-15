@@ -98,6 +98,74 @@ public class SmilApiClient {
         return resp.body();
     }
 
+    public static String putJson(String url, String json, String authHeader) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(15))
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .PUT(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8));
+
+        if (authHeader != null && !authHeader.isEmpty()) {
+            builder.header("Authorization", authHeader);
+        }
+
+        HttpRequest req = builder.build();
+        HttpResponse<String> resp = CLIENT.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return resp.body();
+    }
+
+    /**
+     * Update advanced app setting `captionLiveIngestLanguages` for the given application.
+     * Sets the value to a comma-separated list of enabled languages.
+     */
+public static String updateCaptionLiveIngestLanguages(IApplicationInstance appInstance, List<String> enabledLanguages) throws Exception {
+    String appName = appInstance.getApplication().getName().replace("target", "playout");
+    String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/adv";
+
+    String value = "";
+    if (enabledLanguages != null && !enabledLanguages.isEmpty()) {
+        value = String.join(", ", enabledLanguages);
+    }
+
+    StringBuilder sb = new StringBuilder();
+    sb.append("{");
+    sb.append("\"version\":\"1234567890\","); // This should ideally be retrieved via GET first
+    sb.append("\"serverName\":\"_defaultServer_\",");
+    
+    // Adding the Modules list
+    sb.append("\"modules\":[");
+    sb.append("{\"order\":0,\"name\":\"base\",\"description\":\"Base\",\"class\":\"com.wowza.wms.module.ModuleCore\"},");
+    sb.append("{\"order\":1,\"name\":\"logging\",\"description\":\"Client Logging\",\"class\":\"com.wowza.wms.module.ModuleClientLogging\"},");
+    sb.append("{\"order\":2,\"name\":\"flvplayback\",\"description\":\"FLVPlayback\",\"class\":\"com.wowza.wms.module.ModuleFLVPlayback\"},");
+    sb.append("{\"order\":3,\"name\":\"ModuleCoreSecurity\",\"description\":\"Core Security Module for Applications\",\"class\":\"com.wowza.wms.security.ModuleCoreSecurity\"},");
+    sb.append("{\"order\":4,\"name\":\"ModulePushPublish\",\"description\":\"ModulePushPublish\",\"class\":\"com.wowza.wms.pushpublish.module.ModulePushPublish\"}");
+    sb.append("],");
+
+    // Adding Advanced Settings
+    sb.append("\"advancedSettings\":[{");
+    sb.append("\"sectionName\":\"TimedText\",");
+    sb.append("\"canRemove\":true,");
+    sb.append("\"name\":\"captionLiveIngestLanguages\",");
+    sb.append("\"section\":\"/Root/Application/TimedText\",");
+    sb.append("\"type\":\"String\",");
+    sb.append("\"value\":\"").append(value).append("\",");
+    sb.append("\"enabled\":true");
+    sb.append("}]");
+    sb.append("}");
+
+    try {
+        String auth = readAuthHeader();
+        String resp = putJson(url, sb.toString(), auth);
+        logger.info("Updated modules and captionLiveIngestLanguages for " + appName + " response: " + resp);
+        return resp;
+    } catch (Exception e) {
+        logger.error("Failed to update " + appName, e);
+        throw e;
+    }
+}
+
+
 public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
     String appName = appInstance.getApplication().getName().replace("target", "playout");
     String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;

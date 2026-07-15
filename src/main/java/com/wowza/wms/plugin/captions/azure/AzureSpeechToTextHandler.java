@@ -187,6 +187,7 @@ public class AzureSpeechToTextHandler implements SpeechHandler
 
     private void handleRecognizedEvent(String sessionId, RecognitionResult result)
     {
+        logger.info("why is this being called? ");
         if (result.getReason() == ResultReason.NoMatch && debugLog)
             logger.info(MODULE_NAME + "::" + CLASS_NAME + "handleRecognizedEvent: session: " + sessionId + " NOMATCH: Speech could not be recognized.");
         else

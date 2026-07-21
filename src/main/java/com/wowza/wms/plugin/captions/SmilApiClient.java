@@ -116,8 +116,10 @@ public class SmilApiClient {
     }
 
     /**
-     * Update advanced app setting `captionLiveIngestLanguages` for the given application.
+     * Update advanced app setting `captionLiveIngestLanguages` for the playout application.
      * Sets the value to a comma-separated list of enabled languages.
+     * 
+     * Important for Cloud Stream targets, as this setting is used to determine which languages are available for live caption ingestion.
      */
 public static String updateCaptionLiveIngestLanguages(IApplicationInstance appInstance, List<String> enabledLanguages) throws Exception {
     String appName = appInstance.getApplication().getName().replace("target", "playout");
@@ -134,6 +136,7 @@ public static String updateCaptionLiveIngestLanguages(IApplicationInstance appIn
     sb.append("\"serverName\":\"_defaultServer_\",");
     
     // Adding the Modules list
+    //TODO: Ideally, we should retrieve the existing modules via GET and modify them, but for simplicity, we are hardcoding the modules here. Sorry to future me -RS
     sb.append("\"modules\":[");
     sb.append("{\"order\":0,\"name\":\"base\",\"description\":\"Base\",\"class\":\"com.wowza.wms.module.ModuleCore\"},");
     sb.append("{\"order\":1,\"name\":\"logging\",\"description\":\"Client Logging\",\"class\":\"com.wowza.wms.module.ModuleClientLogging\"},");
@@ -165,7 +168,9 @@ public static String updateCaptionLiveIngestLanguages(IApplicationInstance appIn
     }
 }
 
-
+/**
+     * Create a SMIL file for the playout application, with the specified streams and languages.
+     */
 public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
     String appName = appInstance.getApplication().getName().replace("target", "playout");
     String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;

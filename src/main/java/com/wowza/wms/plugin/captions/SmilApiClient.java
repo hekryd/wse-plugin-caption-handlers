@@ -281,9 +281,8 @@ public static String createSmilForApplication(IApplicationInstance appInstance, 
      * Delete a single SMIL file for the given application (used before creating a new one).
      */
     public static String deleteSmilForApplication(IApplicationInstance appInstance, String smilName) throws Exception {
-        String appName = appInstance.getApplication().getName();
-        String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
-
+        String appName = appInstance.getApplication().getName().replace("target", "playout");
+        String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(Duration.ofSeconds(15))

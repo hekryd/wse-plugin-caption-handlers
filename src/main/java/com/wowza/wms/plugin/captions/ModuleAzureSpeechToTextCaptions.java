@@ -131,9 +131,8 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
                                 String baseSrc = eventInstance + "_" + lang;
                                 String resp = SmilApiClient.createSmilForApplication(appInstance, smilName, baseSrc, enabled_languages, eventInstance, showCaptionsInEvent, lang);
                                 logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
-                                /*  TODO: delete? doesn't seem to be needed since the update
                                 String respApplication = SmilApiClient.updateCaptionLiveIngestLanguages(appInstance, enabled_languages);
-                                logger.info(MODULE_NAME + ".onAppStart updated application caption live ingest languages: " + respApplication);*/
+                                logger.info(MODULE_NAME + ".onAppStart updated application caption live ingest languages: " + respApplication);
                             }
                         } catch (Exception e) {
                             logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);

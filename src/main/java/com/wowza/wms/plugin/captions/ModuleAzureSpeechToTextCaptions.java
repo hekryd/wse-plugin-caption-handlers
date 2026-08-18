@@ -55,7 +55,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private String customer;
     private String liveEventCollection;
     private String eventKey;
-    private int azureDelay = 15000;
+    private int azureDelay = 20000;
 
 
     //event_config

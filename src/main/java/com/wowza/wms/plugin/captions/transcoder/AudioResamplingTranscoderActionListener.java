@@ -153,6 +153,11 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             if (eventColl != null) {
                 try {
                     var coll = mongo.getDatabase().getCollection(eventColl);
+                    if (eventKey != null) {
+                        foundEvent = coll.find(new org.bson.Document("eventKey", eventKey)).first();
+                    }
+
+                    if (foundEvent == null) {
                     for (org.bson.Document doc : coll.find()) {
                         try {
                             org.bson.Document streamDoc = doc.get("stream", org.bson.Document.class);
@@ -175,14 +180,17 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
                             }
                         } catch (Exception ignore) {}
                     }
+                    }
                 } catch (Exception ignore) {}
             }
 
-            if (foundEvent != null && foundEvent.containsKey("languages")) {
+            if (foundEvent != null) {
                 try {
-                    org.bson.Document languages = foundEvent.get("languages", org.bson.Document.class);
-                    if (languages != null && !languages.isEmpty()) {
-                        String detectedLanguageKey = languages.keySet().iterator().next();
+                    org.bson.Document captions = foundEvent.get("captions", org.bson.Document.class);
+                    java.util.List<String> enabledLanguages = captions == null
+                            ? null : captions.getList("enabledLanguages", String.class);
+                    if (enabledLanguages != null && !enabledLanguages.isEmpty()) {
+                        String detectedLanguageKey = enabledLanguages.get(0);
                         return streamLanguage.equals(detectedLanguageKey);
                     }
                 } catch (Exception ignore) {}

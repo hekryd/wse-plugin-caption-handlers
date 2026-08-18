@@ -161,12 +161,18 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 try {
                     String eventColl = this.eventCollectionName != null ? this.eventCollectionName : resolveEventCollectionForStream();
 
-                    // New schema: single "events" collection with event documents containing a top-level
-                    // "languages" sub-document. Try to locate the event document for this stream and
-                    // derive the first language key as the main language.
+                    // New schema: single "events" collection with event documents containing a captions
+                    // sub-document. The first captions.enabledLanguages entry is the configured main
+                    // caption language; the order of keys in the unrelated languages document is not a
+                    // configuration contract.
                     org.bson.Document foundEvent = null;
                     try {
                         var coll = this.mongo.getDatabase().getCollection(eventColl);
+                        if (this.eventKey != null) {
+                            foundEvent = coll.find(new org.bson.Document("eventKey", this.eventKey)).first();
+                        }
+
+                        if (foundEvent == null) {
                         for (org.bson.Document doc : coll.find()) {
                             try {
                                 // Match by stream.instance when possible
@@ -193,22 +199,25 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                                 }
                             } catch (Exception ignore) {}
                         }
+                        }
                     } catch (Exception ignore) {}
 
                     String detectedLanguageKey = null;
-                    if (foundEvent != null && foundEvent.containsKey("languages")) {
+                    if (foundEvent != null) {
                         try {
-                            org.bson.Document languages = foundEvent.get("languages", org.bson.Document.class);
-                            if (languages != null && !languages.isEmpty()) {
-                                detectedLanguageKey = languages.keySet().iterator().next();
+                            org.bson.Document captions = foundEvent.get("captions", org.bson.Document.class);
+                            java.util.List<String> enabledLanguages = captions == null
+                                    ? null : captions.getList("enabledLanguages", String.class);
+                            if (enabledLanguages != null && !enabledLanguages.isEmpty()) {
+                                detectedLanguageKey = enabledLanguages.get(0);
                             }
                         } catch (Exception e) {
-                            logger.error(CLASS_NAME + ".detectMainStream: languages parsing error", e);
+                            logger.error(CLASS_NAME + ".detectMainStream: captions.enabledLanguages parsing error", e);
                         }
                     }
 
                     this.isMainStream = (detectedLanguageKey != null && streamLanguage != null && streamLanguage.equals(detectedLanguageKey));
-                    logger.info(CLASS_NAME + ".detectMainStream: firstLanguageKey=" + detectedLanguageKey + " mainStream=" + this.isMainStream);
+                    logger.info(CLASS_NAME + ".detectMainStream: firstEnabledLanguage=" + detectedLanguageKey + " mainStream=" + this.isMainStream);
                 } catch (Exception e) {
                     logger.error(CLASS_NAME + ".detectMainStream: language detection failed: " + e.getMessage(), e);
                 }

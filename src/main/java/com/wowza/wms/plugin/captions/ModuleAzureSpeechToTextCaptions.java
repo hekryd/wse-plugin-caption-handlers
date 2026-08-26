@@ -55,6 +55,9 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private String customer;
     private String liveEventCollection;
     private String eventKey;
+    private String configuredEventKey;
+    private IApplicationInstance appInstance;
+    private boolean azureConfigured;
     private int azureDelay = 20000;
 
 
@@ -72,6 +75,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         {
             subscriptionKey = Objects.requireNonNull(appInstance.getProperties().getPropertyStr(PROP_SUBSCRIPTION_KEY), "Azure Speech Subscription Key not set");
             serviceRegion = Objects.requireNonNull(appInstance.getProperties().getPropertyStr(PROP_SERVICE_REGION), "Azure Speech Service Region not set");
+            azureConfigured = true;
         }
         catch (NullPointerException npe)
         {
@@ -83,6 +87,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
     public void onAppStart(IApplicationInstance appInstance)
     {
+        this.appInstance = appInstance;
         //logger.error(MODULE_NAME + ".onAppStart initializing MongoDB connection");
         customer = appInstance.getApplication().getName().split("_")[0];
 
@@ -92,84 +97,14 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
             logger.error(MODULE_NAME + ".onAppStart could not initialize MongoDB connection");
         mongo.connect();
 
-        // Find the first event document in the "events" collection that is marked for captioning
-        try {
-            String eventsColl = "events";
-            Document eventDoc = mongo.getDatabase().getCollection(eventsColl)
-                    .find(new Document("captions.nextEventToBeCaptioned", true)).first();
-            if (eventDoc != null) {
-                liveEventCollection = eventsColl;
-                eventKey = eventDoc.getString("eventKey");
-                Document captionConfig = eventDoc.get("captions", Document.class);
-                added_stream_delay_in_ms = captionConfig.getInteger("addedDelayForEditing", added_stream_delay_in_ms) + azureDelay;
-                appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
-                if (captionConfig != null) {
-                    enabled = captionConfig.getBoolean("enabled", enabled);
-
-                    // map new naming: addedDelayForTranscriptionProcess -> added_stream_delay_in_ms
-
-
-                    enabled_languages = captionConfig.getList("enabledLanguages", String.class);
-                    if (enabled_languages != null && !enabled_languages.isEmpty()) {
-                        String enabledCsv = String.join(",", enabled_languages);
-                        appInstance.getProperties().setProperty("enabled_captions_csv", enabledCsv);
-                        appInstance.getTimedTextProperties().setProperty(PROP_DEFAULT_CAPTION_LANGUAGES, enabledCsv);
-                        logger.info(MODULE_NAME + ".onAppStart set enabled_captions_csv: " + enabledCsv);
-
-                        showCaptionsInEvent = captionConfig.getBoolean("enabledForEventPage", showCaptionsInEvent);
-                        try {
-                            String eventInstance = "01";
-                            // try to infer instance from event document stream block if present
-                            try {
-                                Document streamDoc = eventDoc.get("stream", Document.class);
-                                if (streamDoc != null && streamDoc.containsKey("instance"))
-                                    eventInstance = streamDoc.getString("instance");
-                            } catch (Exception ignore) {}
-
-                            for (String lang : enabled_languages) {
-                                String smilName = customer + "_" + eventInstance + "_" + lang;
-                                String baseSrc = eventInstance + "_" + lang;
-                                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName, baseSrc, enabled_languages, eventInstance, showCaptionsInEvent, lang);
-                                logger.info(MODULE_NAME + ".onAppStart created SMIL: " + resp);
-                                String respApplication = SmilApiClient.updateCaptionLiveIngestLanguages(appInstance, enabled_languages);
-                                logger.info(MODULE_NAME + ".onAppStart updated application caption live ingest languages: " + respApplication);
-                            }
-                        } catch (Exception e) {
-                            logger.error(MODULE_NAME + ".onAppStart could not create SMIL", e);
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            logger.error(MODULE_NAME + ".onAppStart MongoDB query failed", e);
-        }
-
-        if (!enabled)
+        if (!azureConfigured)
             return;
+
         try
         {
-            // determine event startAt (if available) and pass as millis to listeners
-            Long eventStartAtMillis = null;
-            try {
-                if (liveEventCollection != null && mongo != null && mongo.getDatabase() != null) {
-                    Document eventDoc = mongo.getDatabase().getCollection(liveEventCollection)
-                            .find(new Document("captions.nextEventToBeCaptioned", true)).first();
-                    if (eventDoc == null) eventDoc = mongo.getDatabase().getCollection(liveEventCollection).find().first();
-                    if (eventDoc != null) {
-                        Object startAtValue = null;
-                        if (eventDoc.containsKey("startAt")) startAtValue = eventDoc.get("startAt");
-                        if (startAtValue instanceof Date) eventStartAtMillis = ((Date) startAtValue).getTime();
-                        else if (startAtValue instanceof Number) eventStartAtMillis = ((Number) startAtValue).longValue();
-                        else if (startAtValue instanceof String) {
-                            try { eventStartAtMillis = java.time.Instant.parse((String) startAtValue).toEpochMilli(); } catch (Exception ignore) {}
-                        }
-                    }
-                }
-            } catch (Exception ignore) {}
-
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
-                appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
-                    subscriptionKey, serviceRegion, mongo, liveEventCollection, eventKey, eventStartAtMillis)));
+            appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
+                    subscriptionKey, serviceRegion, mongo, "events", null, null, this::configureCaptionsForEvent)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }
@@ -181,10 +116,54 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
     public void onStreamCreate(IMediaStream stream)
     {
-        if (!enabled)
+        if (!azureConfigured)
             return;
         stream.addClientListener(delayedStreamListener);
         stream.addLivePacketListener(delayedStreamListener);
+    }
+
+    private synchronized void configureCaptionsForEvent(Document eventDoc)
+    {
+        String selectedEventKey = eventDoc.getString("eventKey");
+        if (selectedEventKey == null || selectedEventKey.equals(configuredEventKey))
+            return;
+
+        Document captionConfig = eventDoc.get("captions", Document.class);
+        if (captionConfig == null)
+            return;
+
+        liveEventCollection = "events";
+        eventKey = selectedEventKey;
+        configuredEventKey = selectedEventKey;
+        enabled = captionConfig.getBoolean("enabled", enabled);
+        added_stream_delay_in_ms = captionConfig.getInteger("addedDelayForEditing", added_stream_delay_in_ms) + azureDelay;
+        appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
+
+        enabled_languages = captionConfig.getList("enabledLanguages", String.class);
+        if (enabled_languages == null || enabled_languages.isEmpty())
+            return;
+
+        String enabledCsv = String.join(",", enabled_languages);
+        appInstance.getProperties().setProperty("enabled_captions_csv", enabledCsv);
+        appInstance.getTimedTextProperties().setProperty(PROP_DEFAULT_CAPTION_LANGUAGES, enabledCsv);
+        logger.info(MODULE_NAME + ".configureCaptionsForEvent set enabled_captions_csv: " + enabledCsv);
+
+        showCaptionsInEvent = captionConfig.getBoolean("enabledForEventPage", showCaptionsInEvent);
+        Document streamDoc = eventDoc.get("stream", Document.class);
+        String eventInstance = streamDoc != null && streamDoc.containsKey("instance") ? streamDoc.getString("instance") : "01";
+        try {
+            for (String lang : enabled_languages) {
+                String smilName = customer + "_" + eventInstance + "_" + lang;
+                String baseSrc = eventInstance + "_" + lang;
+                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName, baseSrc, enabled_languages, eventInstance, showCaptionsInEvent, lang);
+                logger.info(MODULE_NAME + ".configureCaptionsForEvent created SMIL: " + resp);
+                String respApplication = SmilApiClient.updateCaptionLiveIngestLanguages(appInstance, enabled_languages);
+                logger.info(MODULE_NAME + ".configureCaptionsForEvent updated application caption live ingest languages: " + respApplication);
+            }
+        }
+        catch (Exception e) {
+            logger.error(MODULE_NAME + ".configureCaptionsForEvent could not create SMIL", e);
+        }
     }
     public void onAppStop(IApplicationInstance appInstance) throws Exception
     {   

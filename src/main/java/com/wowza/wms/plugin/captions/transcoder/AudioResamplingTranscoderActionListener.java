@@ -21,6 +21,10 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Executors;
@@ -78,9 +82,12 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         if (streamName.endsWith(DELAYED_STREAM_SUFFIX))
             return;
         String mappedName  = streamName.replace(".stream", "");
+        EventConfig eventConfig = resolveEventConfig(mappedName);
+        if (eventConfig == null)
+            return;
 
         // Check if this is the main stream based on language detection
-        boolean isMainStream = isMainStream(mappedName);
+        boolean isMainStream = isMainStream(mappedName, eventConfig);
 
         TranscoderSessionAudio sessionAudio = transcoder.getTranscodingSession().getSessionAudio();
         SpeechHandler speechHandler = handlers.computeIfAbsent(mappedName, k -> {
@@ -88,7 +95,8 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             {
                 DelayedStream delayedStream = delayedStreams.computeIfAbsent(mappedName,
                         name -> new DelayedStream(appInstance, streamName, Executors.newSingleThreadScheduledExecutor()));
-                CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo, eventCollection, eventKey, eventStartAtMillis);
+                CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo,
+                        eventConfig.eventCollection, eventConfig.eventKey, eventConfig.eventStartAtMillis);
 
             // Only create speech handler for main stream
             if (!isMainStream) {
@@ -115,7 +123,69 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         }
     }
 
-    private boolean isMainStream(String streamName) {
+    private EventConfig resolveEventConfig(String streamName)
+    {
+        if (mongo == null)
+            return new EventConfig(eventCollection, eventKey, eventStartAtMillis, null);
+        if (mongo.getDatabase() == null)
+            return null;
+
+        String streamInstance = getStreamInstance(streamName);
+        if (streamInstance == null)
+            return null;
+
+        try {
+            LocalDate today = LocalDate.now(ZoneId.systemDefault());
+            Date startOfToday = Date.from(today.atStartOfDay(ZoneId.systemDefault()).toInstant());
+            Date startOfTomorrow = Date.from(today.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant());
+            org.bson.Document eventFilter = new org.bson.Document("startAt", new org.bson.Document("$gte", startOfToday).append("$lt", startOfTomorrow))
+                    .append("stream.instance", streamInstance)
+                    .append("captions.enabled", true);
+            org.bson.Document eventDoc = mongo.getDatabase().getCollection("events").find(eventFilter).first();
+            if (eventDoc == null) {
+                WMSLoggerFactory.getLoggerObj(AudioResamplingTranscoderActionListener.class, appInstance)
+                        .info("AudioResamplingTranscoderActionListener: no caption event found for stream " + streamName
+                                + " with startAt on " + today + " and stream.instance " + streamInstance);
+                return null;
+            }
+
+            org.bson.Document captions = eventDoc.get("captions", org.bson.Document.class);
+            List<String> enabledLanguages = captions == null ? null : captions.getList("enabledLanguages", String.class);
+            onEventSelected(eventDoc);
+            return new EventConfig("events", eventDoc.getString("eventKey"), getStartAtMillis(eventDoc.get("startAt")), enabledLanguages);
+        }
+        catch (Exception e) {
+            WMSLoggerFactory.getLoggerObj(AudioResamplingTranscoderActionListener.class, appInstance)
+                    .error("AudioResamplingTranscoderActionListener: event lookup failed for stream " + streamName, e);
+            return null;
+        }
+    }
+
+    private String getStreamInstance(String streamName)
+    {
+        if (streamName == null)
+            return null;
+        String normalizedName = streamName.replace(".stream", "");
+        int separator = normalizedName.indexOf('_');
+        return separator > 0 ? normalizedName.substring(0, separator) : null;
+    }
+
+    private Long getStartAtMillis(Object startAtValue)
+    {
+        if (startAtValue instanceof Date)
+            return ((Date) startAtValue).getTime();
+        if (startAtValue instanceof Number)
+            return ((Number) startAtValue).longValue();
+        if (startAtValue instanceof String) {
+            try {
+                return java.time.Instant.parse((String) startAtValue).toEpochMilli();
+            }
+            catch (Exception ignore) {}
+        }
+        return null;
+    }
+
+    private boolean isMainStream(String streamName, EventConfig eventConfig) {
         //wow-03 cant be mainstream only wow-01
         if (mongo == null)
             return true; // Default to true if no mongo instance provided
@@ -126,9 +196,6 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
                 return false;
         } catch (Exception ignore) {}
 
-        if (mongo.getDatabase() == null)
-            return true; // Default to true if no mongo database connection
-
         try {
             String streamLanguage = null;
             if (streamName != null) {
@@ -137,69 +204,31 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
                     streamLanguage = parts[1];
             }
 
-            if (streamLanguage == null)
-                return true; // Default to true if can't parse language
-
-            String eventColl = eventCollection;
-            if (eventColl == null) {
-                // Prefer the single-collection layout
-                try {
-                    var names = mongo.getDatabase().listCollectionNames().into(new java.util.ArrayList<>());
-                    if (names.contains("events")) eventColl = "events";
-                } catch (Exception ignore) {}
-            }
-
-            org.bson.Document foundEvent = null;
-            if (eventColl != null) {
-                try {
-                    var coll = mongo.getDatabase().getCollection(eventColl);
-                    if (eventKey != null) {
-                        foundEvent = coll.find(new org.bson.Document("eventKey", eventKey)).first();
-                    }
-
-                    if (foundEvent == null) {
-                    for (org.bson.Document doc : coll.find()) {
-                        try {
-                            org.bson.Document streamDoc = doc.get("stream", org.bson.Document.class);
-                            String instancePart = null;
-                            try {
-                                String[] parts = streamName.split("_");
-                                if (parts.length > 0) instancePart = parts[0];
-                            } catch (Exception ignore) {}
-                            if (streamDoc != null && instancePart != null && streamDoc.containsKey("instance") && instancePart.equals(streamDoc.getString("instance"))) {
-                                foundEvent = doc;
-                                break;
-                            }
-
-                            if (streamLanguage != null && doc.containsKey("languages")) {
-                                org.bson.Document languages = doc.get("languages", org.bson.Document.class);
-                                if (languages != null && languages.containsKey(streamLanguage)) {
-                                    foundEvent = doc;
-                                    break;
-                                }
-                            }
-                        } catch (Exception ignore) {}
-                    }
-                    }
-                } catch (Exception ignore) {}
-            }
-
-            if (foundEvent != null) {
-                try {
-                    org.bson.Document captions = foundEvent.get("captions", org.bson.Document.class);
-                    java.util.List<String> enabledLanguages = captions == null
-                            ? null : captions.getList("enabledLanguages", String.class);
-                    if (enabledLanguages != null && !enabledLanguages.isEmpty()) {
-                        String detectedLanguageKey = enabledLanguages.get(0);
-                        return streamLanguage.equals(detectedLanguageKey);
-                    }
-                } catch (Exception ignore) {}
-            }
+            if (streamLanguage == null || eventConfig.enabledLanguages == null || eventConfig.enabledLanguages.isEmpty())
+                return true;
+            return streamLanguage.equals(eventConfig.enabledLanguages.get(0));
         } catch (Exception e) {
-            // Log error but default to true to not break existing functionality
+            return true;
         }
 
-        return true; // Default to true if detection fails
+    }
+
+    protected void onEventSelected(org.bson.Document eventDoc) {}
+
+    private static class EventConfig
+    {
+        private final String eventCollection;
+        private final String eventKey;
+        private final Long eventStartAtMillis;
+        private final List<String> enabledLanguages;
+
+        private EventConfig(String eventCollection, String eventKey, Long eventStartAtMillis, List<String> enabledLanguages)
+        {
+            this.eventCollection = eventCollection;
+            this.eventKey = eventKey;
+            this.eventStartAtMillis = eventStartAtMillis;
+            this.enabledLanguages = enabledLanguages;
+        }
     }
 
     public abstract SpeechHandler getSpeechHandler(CaptionHandler captionHandler,String streamName) throws IOException;

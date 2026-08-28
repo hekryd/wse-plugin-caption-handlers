@@ -8,9 +8,15 @@ package com.wowza.wms.plugin.captions.caption;
 import com.wowza.wms.plugin.captions.stream.DelayedStream;
 import com.wowza.wms.amf.*;
 import com.wowza.wms.application.IApplicationInstance;
+import com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.IHTTPStreamerCupertinoLivePacketizerDataHandler2;
+import com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.LiveStreamPacketizerCupertino;
+import com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.LiveStreamPacketizerCupertinoChunk;
 import com.wowza.wms.logging.*;
 import com.wowza.wms.vhost.IVHost;
 import com.wowza.wms.plugin.captions.mongo.Mongo;
+import com.wowza.wms.stream.livepacketizer.ILiveStreamPacketizer;
+import com.wowza.wms.stream.livepacketizer.ILiveStreamPacketizerActionNotify;
+import com.wowza.wms.stream.livepacketizer.LiveStreamPacketizerActionNotifyBase;
 import org.bson.Document;
 
 import java.time.*;
@@ -40,6 +46,7 @@ import org.bson.Document;
 import com.mongodb.client.MongoCursor;
 
 import static com.wowza.wms.plugin.captions.ModuleCaptionsBase.PROP_CAPTIONS_DEBUG_LOG;
+import static com.wowza.wms.plugin.captions.ModuleCaptionsBase.DELAYED_STREAM_SUFFIX;
 import static com.wowza.wms.plugin.captions.caption.CaptionHelper.dotNetEpoch;
 
 public class DelayedStreamCaptionHandler implements CaptionHandler
@@ -51,6 +58,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private static final int MAX_STREAM_CACHE_SIZE = 100;
     private static final int MAX_PUBLISHED_CACHE_SIZE = 10000;
 
+    private final IApplicationInstance appInstance;
     private final DelayedStream delayedStream;
     private final WMSLogger logger;
     private final boolean debugLog;
@@ -72,8 +80,13 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
     private static class PendingCaption {
         final ObjectId id;
+        final long endAbsTimecode;
         final long insertedAt;
-        PendingCaption(ObjectId id, long insertedAt) { this.id = id; this.insertedAt = insertedAt; }
+        PendingCaption(ObjectId id, long endAbsTimecode, long insertedAt) {
+            this.id = id;
+            this.endAbsTimecode = endAbsTimecode;
+            this.insertedAt = insertedAt;
+        }
     }
 
     // FIX #2: Wrap key in a value object to handle timecode collisions explicitly
@@ -82,6 +95,8 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         final java.util.concurrent.ConcurrentLinkedQueue<PendingCaption> captions = new java.util.concurrent.ConcurrentLinkedQueue<>();
     }
     private final ConcurrentMap<Long, PendingCaptionSlot> pendingCaptionByAbsTime = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, PendingCaptionSlot> pendingActualProgramDateTimeByAbsTime = new ConcurrentHashMap<>();
+    private final ILiveStreamPacketizerActionNotify actualProgramDateTimePacketizerListener;
 
     private final ScheduledExecutorService cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "CaptionPendingCleanup"));
     private ScheduledFuture<?> cleanupFuture;
@@ -104,6 +119,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     // FIX #4: Private constructor — use static factory to separate init from thread/DB work
     private DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey,Long eventStartAtMillis)
     {
+        this.appInstance = appInstance;
         this.delayedStream = delayedStream;
         logger = WMSLoggerFactory.getLoggerObj(DelayedStreamCaptionHandler.class, appInstance);
         debugLog = appInstance.getProperties().getPropertyBoolean(PROP_CAPTIONS_DEBUG_LOG, false);
@@ -113,6 +129,48 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         this.eventKey = eventKey;
         this.eventStartAtMillis = eventStartAtMillis;
         this.watcherExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "CaptionChangeWatcher-" + streamName));
+        this.actualProgramDateTimePacketizerListener = new LiveStreamPacketizerActionNotifyBase() {
+            @Override
+            public void onLiveStreamPacketizerCreate(ILiveStreamPacketizer packetizer, String packetizerStreamName) {
+                if (!(packetizer instanceof LiveStreamPacketizerCupertino)
+                        || !((delayedStream.getStreamName() + DELAYED_STREAM_SUFFIX).equals(packetizerStreamName)))
+                    return;
+
+                LiveStreamPacketizerCupertino cupertino = (LiveStreamPacketizerCupertino) packetizer;
+                IHTTPStreamerCupertinoLivePacketizerDataHandler2 existingHandler = cupertino.getDataHandler2();
+                cupertino.setDataHandler(new IHTTPStreamerCupertinoLivePacketizerDataHandler2() {
+                    @Override
+                    public void onFillChunkStart(LiveStreamPacketizerCupertinoChunk chunk) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkStart(chunk);
+                    }
+
+                    @Override
+                    public void onFillChunkEnd(LiveStreamPacketizerCupertinoChunk chunk, long timecode) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkEnd(chunk, timecode);
+                        persistActualProgramDateTimes(chunk);
+                    }
+
+                    @Override
+                    public void onFillChunkDataPacket(LiveStreamPacketizerCupertinoChunk chunk,
+                                                      com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.CupertinoPacketHolder holder,
+                                                      AMFPacket packet,
+                                                      com.wowza.wms.media.mp3.model.idtags.ID3Frames id3Frames) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkDataPacket(chunk, holder, packet, id3Frames);
+                    }
+
+                    @Override
+                    public void onFillChunkMediaPacket(LiveStreamPacketizerCupertinoChunk chunk,
+                                                       com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.CupertinoPacketHolder holder,
+                                                       AMFPacket packet) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkMediaPacket(chunk, holder, packet);
+                    }
+                });
+            }
+        };
     }
 
     /**
@@ -142,6 +200,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             startPendingCleanupTask();
         }
 
+        appInstance.addLiveStreamPacketizerListener(actualProgramDateTimePacketizerListener);
         registerPublishListener();
     }
 
@@ -251,7 +310,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
                     if (id != null) {
                         mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
-                                .updateOne(new Document("_id", id), new Document("$set", new Document("published", true).append("publishedAt", new Date())));
+                                .updateOne(new Document("_id", id), new Document("$set", new Document("published", true).append("actualPublishTime", new Date())));
                         if (debugLog)
                             logger.info(CLASS_NAME + ".publishListener: marked published for id=" + id + " db=" + captionsDbName + " coll=" + eventCollection);
                     } else {
@@ -263,7 +322,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                             Document timeRange = new Document("$gte", new Date(from)).append("$lte", new Date(to));
                             Document filter = new Document("publishTime", timeRange).append("published", new Document("$ne", true));
                             var updateRes = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
-                                    .updateOne(filter, new Document("$set", new Document("published", true).append("publishedAt", new Date())));
+                                    .updateOne(filter, new Document("$set", new Document("published", true).append("actualPublishTime", new Date())));
                             if (debugLog)
                                 logger.info(CLASS_NAME + ".publishListener: fallback update by time range for absTimecode=" + absTimecode
                                         + " db=" + captionsDbName + " coll=" + eventCollection
@@ -278,6 +337,44 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             });
         } catch (Exception e) {
             logger.error(CLASS_NAME + ".registerPublishListener: failed to register publish listener: " + e.getMessage(), e);
+        }
+    }
+
+    private void persistActualProgramDateTimes(LiveStreamPacketizerCupertinoChunk chunk)
+    {
+        if (mongo == null || mongo.getClient() == null || chunk.getProgramDateTime() == null || chunk.getDataPackets() == null)
+            return;
+
+        final Instant chunkProgramDateTime;
+        try {
+            chunkProgramDateTime = OffsetDateTime.parse(chunk.getProgramDateTime()).toInstant();
+        } catch (Exception e) {
+            logger.warn(CLASS_NAME + ".persistActualProgramDateTimes: invalid chunk program date/time '" + chunk.getProgramDateTime() + "'");
+            return;
+        }
+
+        for (AMFPacket packet : chunk.getDataPackets()) {
+            if (packet == null)
+                continue;
+
+            PendingCaptionSlot slot = pendingActualProgramDateTimeByAbsTime.remove(packet.getAbsTimecode());
+            if (slot == null)
+                continue;
+
+            Instant captionStart = chunkProgramDateTime.plusMillis(packet.getAbsTimecode() - chunk.getStartTimecode());
+            PendingCaption pendingCaption;
+            while ((pendingCaption = slot.captions.poll()) != null) {
+                try {
+                    Instant captionEnd = captionStart.plusMillis(pendingCaption.endAbsTimecode - packet.getAbsTimecode());
+                    mongo.getClient().getDatabase(resolveCaptionsDbName()).getCollection(eventKey).updateOne(
+                            new Document("_id", pendingCaption.id),
+                            new Document("$set", new Document("hlsChunkProgramDateTime", chunk.getProgramDateTime())
+                                    .append("actualProgramDateTimeStart", Date.from(captionStart))
+                                    .append("actualProgramDateTimeEnd", Date.from(captionEnd))));
+                } catch (Exception e) {
+                    logger.error(CLASS_NAME + ".persistActualProgramDateTimes: failed to store HLS program date/time", e);
+                }
+            }
         }
     }
 
@@ -313,24 +410,29 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 String captionsDbName = resolveCaptionsDbName();
 
                 long systemTime = System.currentTimeMillis();
-                // Deterministic pairing id so captions from different languages that
-                // belong to the same chunk share the same `pairId`. We base this on
                 // the publish timestamp rounded to a small window and the caption start.
                 long publishMillis = startOffset + captionOffset;
-                long rounded = (publishMillis / 500L) * 500L; // 500ms bucket
-                String pairId = UUID.nameUUIDFromBytes((String.valueOf(rounded) + "_" + caption.getBegin()).getBytes(StandardCharsets.UTF_8)).toString();
+                long programDateTimeStartMillis = delayedStream.estimatedPublishTimeMillis(publishMillis);
+                long programDateTimeEndMillis = delayedStream.estimatedPublishTimeMillis(startOffset + caption.getEnd());
 
                 Document doc = new Document()
-                    .append("pairId", pairId)
+                    // Caption identity and content
                     .append("mainStream", streamName)
                     .append("language", caption.getLanguage())
                     .append("text", caption.getText())
-                    //.append("trackId", caption.getTrackId())
+
+                    // Original speech/video timing
                     .append("videoTimecode", captionOffset)
-                    .append("systemTime", systemTime)
                     .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
                     .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
-                    .append("publishTime", new Date(delayedStream.estimatedPublishTimeMillis(publishMillis)))
+
+                    // Estimated HLS display timing, available immediately
+                    .append("programDateTimeStart", new Date(programDateTimeStartMillis))
+                    .append("programDateTimeEnd", new Date(programDateTimeEndMillis))
+                    .append("publishTime", new Date(programDateTimeStartMillis))
+
+                    // Database audit timing
+                    .append("systemTime", systemTime)
                     .append("createdAt", new Date());
 
                 // Only persist captions if the event's startAt is in the past (event already started)
@@ -384,7 +486,11 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
                     // FIX #2: Use computeIfAbsent + queue to safely accumulate multiple captions at the same timecode
                     PendingCaptionSlot slot = pendingCaptionByAbsTime.computeIfAbsent(absTime, k -> new PendingCaptionSlot());
-                    slot.captions.add(new PendingCaption(id, System.currentTimeMillis()));
+                    PendingCaption pendingCaption = new PendingCaption(id, startOffset + caption.getEnd(), System.currentTimeMillis());
+                    slot.captions.add(pendingCaption);
+                    pendingActualProgramDateTimeByAbsTime
+                            .computeIfAbsent(absTime, k -> new PendingCaptionSlot())
+                            .captions.add(pendingCaption);
 
                     if (debugLog)
                         logger.info(CLASS_NAME + ".handleCaption: persisted caption id=" + id + " absTime=" + absTime + " DB=" + captionsDbName + " coll=" + eventKey);
@@ -454,9 +560,12 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         if (full == null)
                             continue;
 
+                        if (isActualProgramDateTimeUpdate(change))
+                            continue;
+
                         ObjectId captionId = full.getObjectId("_id");
                         boolean isPublished = full.getBoolean("published", false);
-                        Date publishedAt = full.getDate("publishedAt");
+                        Date actualPublishTime = full.getDate("actualPublishTime");
 
                         // Handle UPDATE and REPLACE events
                         try {
@@ -490,7 +599,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         }
 
                         // FIX #9 (was #6 / localPublishedCache capture): access the final field directly — no captured reference
-                        if (isPublished && publishedAt != null && captionId != null && !publishedCaptionIds.containsKey(captionId)) {
+                        if (isPublished && actualPublishTime != null && captionId != null && !publishedCaptionIds.containsKey(captionId)) {
                             publishedCaptionIds.put(captionId, System.currentTimeMillis());
 
                             String language = full.getString("language");
@@ -524,6 +633,17 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 logger.error(CLASS_NAME + ".startChangeStreamWatcher: watcher failed: " + e.getMessage(), e);
             }
         });
+    }
+
+    private boolean isActualProgramDateTimeUpdate(ChangeStreamDocument<Document> change)
+    {
+        if (change.getOperationType() != OperationType.UPDATE || change.getUpdateDescription() == null)
+            return false;
+
+        org.bson.BsonDocument updatedFields = change.getUpdateDescription().getUpdatedFields();
+        return updatedFields != null && !updatedFields.isEmpty()
+                && updatedFields.keySet().stream().allMatch(field -> field.equals("hlsChunkProgramDateTime")
+                || field.equals("actualProgramDateTimeStart") || field.equals("actualProgramDateTimeEnd"));
     }
 
     public void stopChangeStreamWatcher() {
@@ -566,6 +686,20 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         }
                     }
 
+                    var actualProgramDateTimeIterator = pendingActualProgramDateTimeByAbsTime.entrySet().iterator();
+                    while (actualProgramDateTimeIterator.hasNext()) {
+                        var entry = actualProgramDateTimeIterator.next();
+                        PendingCaptionSlot slot = entry.getValue();
+                        if (slot != null) {
+                            slot.captions.removeIf(pc -> pc != null && (now - pc.insertedAt) > retentionMillis);
+                            if (slot.captions.isEmpty()) {
+                                actualProgramDateTimeIterator.remove();
+                            }
+                        } else {
+                            actualProgramDateTimeIterator.remove();
+                        }
+                    }
+
                     // FIX #5: Time-based eviction of publishedCaptionIds lives here exclusively,
                     // since removeEldestEntry can only evict one entry per put and only the eldest.
                     synchronized (publishedCaptionIds) {
@@ -591,6 +725,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
     public void close() {
         try { stopChangeStreamWatcher(); } catch (Exception ignore) {}
+        try { appInstance.removeLiveStreamPacketizerListener(actualProgramDateTimePacketizerListener); } catch (Exception ignore) {}
         try { delayedStream.setPublishListener(null); } catch (Exception ignore) {}
         try {
             if (cleanupFuture != null) cleanupFuture.cancel(true);
@@ -600,6 +735,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             Thread.currentThread().interrupt();
         } catch (Exception ignore) {}
         try { pendingCaptionByAbsTime.clear(); } catch (Exception ignore) {}
+        try { pendingActualProgramDateTimeByAbsTime.clear(); } catch (Exception ignore) {}
         try { streamToEventCollection.clear(); } catch (Exception ignore) {}
         try { publishedCaptionIds.clear(); } catch (Exception ignore) {}
     }

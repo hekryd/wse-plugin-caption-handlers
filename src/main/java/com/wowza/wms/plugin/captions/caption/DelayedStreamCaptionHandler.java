@@ -220,9 +220,8 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 try {
                     String eventColl = this.eventCollectionName != null ? this.eventCollectionName : resolveEventCollectionForStream();
 
-                    // New schema: single "events" collection with event documents containing a captions
-                    // sub-document. The first captions.enabledLanguages entry is the configured main
-                    // caption language; the order of keys in the unrelated languages document is not a
+                    // The first top-level enabledLanguages entry is the configured main caption
+                    // language; the order of keys in the unrelated languages document is not a
                     // configuration contract.
                     org.bson.Document foundEvent = null;
                     try {
@@ -264,14 +263,12 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     String detectedLanguageKey = null;
                     if (foundEvent != null) {
                         try {
-                            org.bson.Document captions = foundEvent.get("captions", org.bson.Document.class);
-                            java.util.List<String> enabledLanguages = captions == null
-                                    ? null : captions.getList("enabledLanguages", String.class);
+                            java.util.List<String> enabledLanguages = foundEvent.getList("enabledLanguages", String.class);
                             if (enabledLanguages != null && !enabledLanguages.isEmpty()) {
                                 detectedLanguageKey = enabledLanguages.get(0);
                             }
                         } catch (Exception e) {
-                            logger.error(CLASS_NAME + ".detectMainStream: captions.enabledLanguages parsing error", e);
+                            logger.error(CLASS_NAME + ".detectMainStream: enabledLanguages parsing error", e);
                         }
                     }
 

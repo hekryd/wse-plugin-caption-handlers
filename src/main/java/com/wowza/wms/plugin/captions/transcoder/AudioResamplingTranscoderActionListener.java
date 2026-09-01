@@ -149,8 +149,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
                 return null;
             }
 
-            org.bson.Document captions = eventDoc.get("captions", org.bson.Document.class);
-            List<String> enabledLanguages = captions == null ? null : captions.getList("enabledLanguages", String.class);
+            List<String> enabledLanguages = eventDoc.getList("enabledLanguages", String.class);
             onEventSelected(eventDoc);
             return new EventConfig("events", eventDoc.getString("eventKey"), getStartAtMillis(eventDoc.get("startAt")), enabledLanguages);
         }

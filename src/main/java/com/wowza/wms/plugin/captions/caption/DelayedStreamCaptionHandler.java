@@ -49,6 +49,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private static final Class<DelayedStreamCaptionHandler> CLASS = DelayedStreamCaptionHandler.class;
     private static final String CLASS_NAME = CLASS.getSimpleName();
     private static final int DEFAULT_WORDS_PER_MINUTE = 150;
+    private static final long CAPTION_DISPLAY_OFFSET_MILLIS = 1_000L;
 
     private static final int MAX_STREAM_CACHE_SIZE = 100;
 
@@ -382,7 +383,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         byte[] data = dataList.serialize();
 
         long startOffset = delayedStream.getStartOffset();
-        long captionOffset = caption.getBegin();
+        // Shift the whole cue, rather than only its start, so its duration is preserved.
+        long captionOffset = caption.getBegin() + CAPTION_DISPLAY_OFFSET_MILLIS;
+        long captionEndOffset = caption.getEnd() + CAPTION_DISPLAY_OFFSET_MILLIS;
         AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
         packet.setAbsTimecode(startOffset + captionOffset);
         if (debugLog)
@@ -398,7 +401,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 // the publish timestamp rounded to a small window and the caption start.
                 long publishMillis = startOffset + captionOffset;
                 long programDateTimeStartMillis = delayedStream.estimatedPublishTimeMillis(publishMillis);
-                long programDateTimeEndMillis = delayedStream.estimatedPublishTimeMillis(startOffset + caption.getEnd());
+                long programDateTimeEndMillis = delayedStream.estimatedPublishTimeMillis(startOffset + captionEndOffset);
 
                 Document doc = new Document()
                     // Caption identity and content
@@ -409,8 +412,8 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
                     // Original speech/video timing
                     .append("videoTimecode", captionOffset)
-                    .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getBegin())))
-                    .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(caption.getEnd())))
+                    .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(captionOffset)))
+                    .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(captionEndOffset)))
 
                     // Estimated HLS display timing, available immediately
                     .append("programDateTimeStart", new Date(programDateTimeStartMillis))
@@ -472,7 +475,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
                     // FIX #2: Use computeIfAbsent + queue to safely accumulate multiple captions at the same timecode
                     PendingCaptionSlot slot = pendingCaptionByAbsTime.computeIfAbsent(absTime, k -> new PendingCaptionSlot());
-                    PendingCaption pendingCaption = new PendingCaption(id, absTime, startOffset + caption.getEnd(), System.currentTimeMillis(), packet);
+                    PendingCaption pendingCaption = new PendingCaption(id, absTime, startOffset + captionEndOffset, System.currentTimeMillis(), packet);
                     slot.captions.add(pendingCaption);
                     pendingCaptionById.put(id, pendingCaption);
                     pendingActualProgramDateTimeByAbsTime

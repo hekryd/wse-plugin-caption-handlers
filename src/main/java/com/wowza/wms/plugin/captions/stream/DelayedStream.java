@@ -41,6 +41,9 @@ public class DelayedStream
     private boolean isFirstAudio = true;
     private boolean isFirstVideo = true;
     private final Queue<AMFPacket> packets = new PriorityBlockingQueue<>(2400, new AMFPacketComparator());
+    // Packet publication and replacement must be atomic: an edit must not replace a
+    // packet that processPackets has already selected for publication.
+    private final Object packetLock = new Object();
     private volatile boolean doShutdown = false;
 
     public DelayedStream(IApplicationInstance appInstance, String streamName, ScheduledExecutorService executor)
@@ -77,19 +80,39 @@ public class DelayedStream
 
     public void writePacket(AMFPacket packet)
     {
-        if(doShutdown)
-            return;
-        packets.add(packet);
-        if (debugLog)
-            logger.info(MODULE_NAME + "::" + CLASS_NAME + ".writePacket() [" + appInstance.getContextStr() + "/" + streamName + "] packet: " + packet);
-        if (startOffset == -1)
-            startOffset = packet.getAbsTimecode();
+        synchronized (packetLock) {
+            if(doShutdown)
+                return;
+            packets.add(packet);
+            if (debugLog)
+                logger.info(MODULE_NAME + "::" + CLASS_NAME + ".writePacket() [" + appInstance.getContextStr() + "/" + streamName + "] packet: " + packet);
+            if (startOffset == -1)
+                startOffset = packet.getAbsTimecode();
+        }
+    }
+
+    /**
+     * Replaces a packet that has not yet been published. Returns false when the
+     * original packet has already left the delay queue and therefore cannot be
+     * changed in the live stream.
+     */
+    public boolean replacePendingPacket(AMFPacket originalPacket, AMFPacket replacementPacket)
+    {
+        synchronized (packetLock) {
+            if (doShutdown || !packets.remove(originalPacket))
+                return false;
+            packets.add(replacementPacket);
+            if (debugLog)
+                logger.info(MODULE_NAME + "::" + CLASS_NAME + ".replacePendingPacket() [" + appInstance.getContextStr() + "/" + streamName + "] packet: " + replacementPacket);
+            return true;
+        }
     }
 
     private void processPackets()
     {
-        try
-        {
+        synchronized (packetLock) {
+            try
+            {
             if(doShutdown && packets.isEmpty())
             {
                 executor.shutdown();
@@ -207,10 +230,11 @@ public class DelayedStream
                 }
                 packets.remove(packet);
             }
-        }
-        catch (Exception e)
-        {
-            logger.error(MODULE_NAME + "::" + CLASS_NAME + ".writePacket[metadata] ", e);
+            }
+            catch (Exception e)
+            {
+                logger.error(MODULE_NAME + "::" + CLASS_NAME + ".writePacket[metadata] ", e);
+            }
         }
     }
 

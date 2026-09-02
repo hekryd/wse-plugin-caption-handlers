@@ -21,19 +21,14 @@ import org.bson.Document;
 
 import java.time.*;
 import java.util.Date;
-import java.util.UUID;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Future;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.LinkedHashMap;
-import java.util.Collections;
 import java.util.concurrent.atomic.AtomicBoolean;
 import com.mongodb.client.result.InsertOneResult;
 import org.bson.types.ObjectId;
@@ -56,7 +51,6 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private static final int DEFAULT_WORDS_PER_MINUTE = 150;
 
     private static final int MAX_STREAM_CACHE_SIZE = 100;
-    private static final int MAX_PUBLISHED_CACHE_SIZE = 10000;
 
     private final IApplicationInstance appInstance;
     private final DelayedStream delayedStream;
@@ -80,12 +74,17 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
     private static class PendingCaption {
         final ObjectId id;
+        final long absTimecode;
         final long endAbsTimecode;
         final long insertedAt;
-        PendingCaption(ObjectId id, long endAbsTimecode, long insertedAt) {
+        volatile AMFPacket packet;
+
+        PendingCaption(ObjectId id, long absTimecode, long endAbsTimecode, long insertedAt, AMFPacket packet) {
             this.id = id;
+            this.absTimecode = absTimecode;
             this.endAbsTimecode = endAbsTimecode;
             this.insertedAt = insertedAt;
+            this.packet = packet;
         }
     }
 
@@ -96,25 +95,13 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     }
     private final ConcurrentMap<Long, PendingCaptionSlot> pendingCaptionByAbsTime = new ConcurrentHashMap<>();
     private final ConcurrentMap<Long, PendingCaptionSlot> pendingActualProgramDateTimeByAbsTime = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ObjectId, PendingCaption> pendingCaptionById = new ConcurrentHashMap<>();
     private final ILiveStreamPacketizerActionNotify actualProgramDateTimePacketizerListener;
 
     private final ScheduledExecutorService cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "CaptionPendingCleanup"));
     private ScheduledFuture<?> cleanupFuture;
     private volatile MongoCursor<ChangeStreamDocument<Document>> watcherCursor;
     private volatile Future<?> watcherFuture;
-
-    // FIX #5 + #7: final (not volatile), bounded LinkedHashMap with correct eviction
-    private final Map<ObjectId, Long> publishedCaptionIds = Collections.synchronizedMap(
-        new LinkedHashMap<ObjectId, Long>(16, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<ObjectId, Long> eldest) {
-                // Size-based eviction only — time-based eviction is handled by the cleanup task
-                // because removeEldestEntry only fires on put() and only removes one entry at a time,
-                // making it unreliable for time-based expiry of non-eldest entries.
-                return size() > MAX_PUBLISHED_CACHE_SIZE;
-            }
-        }
-    );
 
     // FIX #4: Private constructor — use static factory to separate init from thread/DB work
     private DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey,Long eventStartAtMillis)
@@ -306,6 +293,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     String eventCollection = eventKey;
 
                     if (id != null) {
+                        pendingCaptionById.remove(id);
                         mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
                                 .updateOne(new Document("_id", id), new Document("$set", new Document("published", true).append("actualPublishTime", new Date())));
                         if (debugLog)
@@ -417,6 +405,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                     .append("mainStream", streamName)
                     .append("language", caption.getLanguage())
                     .append("text", caption.getText())
+                    .append("trackId", caption.getTrackId())
 
                     // Original speech/video timing
                     .append("videoTimecode", captionOffset)
@@ -483,8 +472,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
 
                     // FIX #2: Use computeIfAbsent + queue to safely accumulate multiple captions at the same timecode
                     PendingCaptionSlot slot = pendingCaptionByAbsTime.computeIfAbsent(absTime, k -> new PendingCaptionSlot());
-                    PendingCaption pendingCaption = new PendingCaption(id, startOffset + caption.getEnd(), System.currentTimeMillis());
+                    PendingCaption pendingCaption = new PendingCaption(id, absTime, startOffset + caption.getEnd(), System.currentTimeMillis(), packet);
                     slot.captions.add(pendingCaption);
+                    pendingCaptionById.put(id, pendingCaption);
                     pendingActualProgramDateTimeByAbsTime
                             .computeIfAbsent(absTime, k -> new PendingCaptionSlot())
                             .captions.add(pendingCaption);
@@ -561,65 +551,8 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                             continue;
 
                         ObjectId captionId = full.getObjectId("_id");
-                        boolean isPublished = full.getBoolean("published", false);
-                        Date actualPublishTime = full.getDate("actualPublishTime");
-
-                        // Handle UPDATE and REPLACE events
-                        try {
-                            OperationType opType = change.getOperationType();
-                            if (opType == OperationType.UPDATE || opType == OperationType.REPLACE) {
-                                String language = full.getString("language");
-                                String text = full.getString("text");
-                                int trackId = full.containsKey("trackId") ? full.getInteger("trackId", 99) : 99;
-
-                                AMFDataObj amfDataU = new AMFDataObj();
-                                amfDataU.put("text", new AMFDataItem(text));
-                                amfDataU.put("language", new AMFDataItem(language));
-                                amfDataU.put("trackid", new AMFDataItem(trackId));
-
-                                AMFDataList dataListU = new AMFDataList();
-                                dataListU.add(new AMFDataItem("onTextData"));
-                                dataListU.add(amfDataU);
-                                byte[] dataU = dataListU.serialize();
-
-                                long nowTimecodeU = delayedStream.getPublishedStreamTimecode();
-                                AMFPacket packetU = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, dataU);
-                                packetU.setAbsTimecode(nowTimecodeU + 1);
-                                delayedStream.writePacket(packetU);
-
-                                if (debugLog)
-                                    logger.info(CLASS_NAME + ".changeWatcher: applied text update for id=" + captionId + " stream=" + streamName);
-                                continue;
-                            }
-                        } catch (Exception e) {
-                            logger.error(CLASS_NAME + ".changeWatcher: failed to handle update event: " + e.getMessage(), e);
-                        }
-
-                        // FIX #9 (was #6 / localPublishedCache capture): access the final field directly — no captured reference
-                        if (isPublished && actualPublishTime != null && captionId != null && !publishedCaptionIds.containsKey(captionId)) {
-                            publishedCaptionIds.put(captionId, System.currentTimeMillis());
-
-                            String language = full.getString("language");
-                            String text = full.getString("text");
-                            int trackId = full.containsKey("trackId") ? full.getInteger("trackId", 99) : 99;
-
-                            AMFDataObj amfData = new AMFDataObj();
-                            amfData.put("text", new AMFDataItem(text));
-                            amfData.put("language", new AMFDataItem(language));
-                            amfData.put("trackid", new AMFDataItem(trackId));
-
-                            AMFDataList dataList = new AMFDataList();
-                            dataList.add(new AMFDataItem("onTextData"));
-                            dataList.add(amfData);
-                            byte[] data = dataList.serialize();
-
-                            long nowTimecode = delayedStream.getPublishedStreamTimecode();
-                            AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
-                            packet.setAbsTimecode(nowTimecode + 1);
-                            delayedStream.writePacket(packet);
-
-                            if (debugLog)
-                                logger.info(CLASS_NAME + ".changeWatcher: instantly published caption for stream " + streamName + " id=" + captionId);
+                        if (isCaptionContentUpdate(change, captionId)) {
+                            replacePendingCaption(captionId, full);
                         }
                     }
                 } finally {
@@ -641,6 +574,70 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         return updatedFields != null && !updatedFields.isEmpty()
                 && updatedFields.keySet().stream().allMatch(field -> field.equals("hlsChunkProgramDateTime")
                 || field.equals("actualProgramDateTimeStart") || field.equals("actualProgramDateTimeEnd"));
+    }
+
+    /**
+     * A publish/audit update must not be mistaken for an edit. Only a change to
+     * data carried by the timed-text packet can replace a queued caption.
+     */
+    private boolean isCaptionContentUpdate(ChangeStreamDocument<Document> change, ObjectId captionId)
+    {
+        if (captionId == null || !pendingCaptionById.containsKey(captionId))
+            return false;
+
+        if (change.getOperationType() == OperationType.REPLACE)
+            return true;
+        if (change.getOperationType() != OperationType.UPDATE || change.getUpdateDescription() == null)
+            return false;
+
+        org.bson.BsonDocument updatedFields = change.getUpdateDescription().getUpdatedFields();
+        return updatedFields != null && (updatedFields.containsKey("text")
+                || updatedFields.containsKey("language")
+                || updatedFields.containsKey("trackId"));
+    }
+
+    private void replacePendingCaption(ObjectId captionId, Document captionDocument)
+    {
+        try {
+            PendingCaption pendingCaption = pendingCaptionById.get(captionId);
+            if (pendingCaption == null)
+                return;
+
+            String language = captionDocument.getString("language");
+            String text = captionDocument.getString("text");
+            int trackId = captionDocument.getInteger("trackId", 99);
+            AMFPacket replacement = createCaptionPacket(text, language, trackId, pendingCaption.absTimecode);
+
+            if (delayedStream.replacePendingPacket(pendingCaption.packet, replacement)) {
+                pendingCaption.packet = replacement;
+                if (debugLog)
+                    logger.info(CLASS_NAME + ".changeWatcher: replaced pending caption id=" + captionId
+                            + " at timecode=" + pendingCaption.absTimecode + " stream=" + streamName);
+            } else {
+                // The packet has already been sent. Do not append an out-of-time edit.
+                pendingCaptionById.remove(captionId, pendingCaption);
+                if (debugLog)
+                    logger.info(CLASS_NAME + ".changeWatcher: caption id=" + captionId + " was already published; edit was not inserted");
+            }
+        } catch (Exception e) {
+            logger.error(CLASS_NAME + ".changeWatcher: failed to replace pending caption: " + e.getMessage(), e);
+        }
+    }
+
+    private AMFPacket createCaptionPacket(String text, String language, int trackId, long absTimecode)
+    {
+        AMFDataObj amfData = new AMFDataObj();
+        amfData.put("text", new AMFDataItem(text));
+        amfData.put("language", new AMFDataItem(language));
+        amfData.put("trackid", new AMFDataItem(trackId));
+
+        AMFDataList dataList = new AMFDataList();
+        dataList.add(new AMFDataItem("onTextData"));
+        dataList.add(amfData);
+
+        AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, dataList.serialize());
+        packet.setAbsTimecode(absTimecode);
+        return packet;
     }
 
     public void stopChangeStreamWatcher() {
@@ -673,7 +670,12 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         PendingCaptionSlot slot = entry.getValue();
                         if (slot != null) {
                             // Remove individual expired entries from the slot queue
-                            slot.captions.removeIf(pc -> pc != null && (now - pc.insertedAt) > retentionMillis);
+                            slot.captions.removeIf(pc -> {
+                                boolean expired = pc != null && (now - pc.insertedAt) > retentionMillis;
+                                if (expired)
+                                    pendingCaptionById.remove(pc.id, pc);
+                                return expired;
+                            });
                             // Remove the slot entirely if it's empty
                             if (slot.captions.isEmpty()) {
                                 iterator.remove();
@@ -697,18 +699,6 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         }
                     }
 
-                    // FIX #5: Time-based eviction of publishedCaptionIds lives here exclusively,
-                    // since removeEldestEntry can only evict one entry per put and only the eldest.
-                    synchronized (publishedCaptionIds) {
-                        var pubIterator = publishedCaptionIds.entrySet().iterator();
-                        while (pubIterator.hasNext()) {
-                            var entry = pubIterator.next();
-                            Long timestamp = entry.getValue();
-                            if (timestamp != null && (now - timestamp) > TimeUnit.MINUTES.toMillis(5)) {
-                                pubIterator.remove();
-                            }
-                        }
-                    }
                 } catch (Exception e) {
                     if (debugLog)
                         logger.warn(CLASS_NAME + ".cleanupTask: error during cleanup: " + e.getMessage());
@@ -733,8 +723,8 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         } catch (Exception ignore) {}
         try { pendingCaptionByAbsTime.clear(); } catch (Exception ignore) {}
         try { pendingActualProgramDateTimeByAbsTime.clear(); } catch (Exception ignore) {}
+        try { pendingCaptionById.clear(); } catch (Exception ignore) {}
         try { streamToEventCollection.clear(); } catch (Exception ignore) {}
-        try { publishedCaptionIds.clear(); } catch (Exception ignore) {}
     }
 
     /**

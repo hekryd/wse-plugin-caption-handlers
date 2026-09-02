@@ -32,6 +32,23 @@ public class SmilApiClient {
         return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
+    /**
+     * Resolve the companion playout application for a customer target application.
+     */
+    static String getPlayoutApplicationName(String targetApplicationName) {
+        final String targetSuffix = "_target";
+        final String playoutSuffix = "_playout";
+        if (!targetApplicationName.endsWith(targetSuffix)) {
+            throw new IllegalArgumentException(
+                    "Expected a target application name ending in " + targetSuffix + ": " + targetApplicationName);
+        }
+        return targetApplicationName.substring(0, targetApplicationName.length() - targetSuffix.length()) + playoutSuffix;
+    }
+
+    private static String getPlayoutApplicationName(IApplicationInstance appInstance) {
+        return getPlayoutApplicationName(appInstance.getApplication().getName());
+    }
+
 
     public static class SmilStream {
         public String systemLanguage;
@@ -122,7 +139,7 @@ public class SmilApiClient {
      * Important for Cloud Stream targets, as this setting is used to determine which languages are available for live caption ingestion.
      */
 public static String updateCaptionLiveIngestLanguages(IApplicationInstance appInstance, List<String> enabledLanguages) throws Exception {
-    String appName = appInstance.getApplication().getName().replace("target", "playout");
+    String appName = getPlayoutApplicationName(appInstance);
     String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/adv";
 
     String value = "";
@@ -172,7 +189,7 @@ public static String updateCaptionLiveIngestLanguages(IApplicationInstance appIn
      * Create a SMIL file for the playout application, with the specified streams and languages.
      */
 public static String createSmilForApplication(IApplicationInstance appInstance, String smilName, List<SmilStream> streams, List<String> languages, String eventInstance, boolean showCaptionsInEvent, String smilLanguage) throws Exception {
-    String appName = appInstance.getApplication().getName().replace("target", "playout");
+    String appName = getPlayoutApplicationName(appInstance);
     String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;
 
     StringBuilder sb = new StringBuilder();
@@ -241,7 +258,7 @@ public static String createSmilForApplication(IApplicationInstance appInstance, 
 
 
     public static String deleteSmilForApplication(IApplicationInstance appInstance) throws Exception {
-        String appName = appInstance.getApplication().getName();
+        String appName = getPlayoutApplicationName(appInstance);
 
         if (createdSmilFiles.isEmpty()) {
             logger.info("No SMIL files to delete for application: " + appName);
@@ -251,7 +268,7 @@ public static String createSmilForApplication(IApplicationInstance appInstance, 
         List<String> deleted = new ArrayList<>();
         for (String smilName : new ArrayList<>(createdSmilFiles)) {
             try {
-                String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "_playout" + "/smilfiles/" + smilName;
+                String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;
 
                 HttpRequest.Builder builder = HttpRequest.newBuilder()
                         .uri(URI.create(url))
@@ -281,7 +298,7 @@ public static String createSmilForApplication(IApplicationInstance appInstance, 
      * Delete a single SMIL file for the given application (used before creating a new one).
      */
     public static String deleteSmilForApplication(IApplicationInstance appInstance, String smilName) throws Exception {
-        String appName = appInstance.getApplication().getName().replace("target", "playout");
+        String appName = getPlayoutApplicationName(appInstance);
         String url = "http://localhost:8087/v2/servers/_defaultServer_/vhosts/_defaultVHost_/applications/" + appName + "/smilfiles/" + smilName;
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))

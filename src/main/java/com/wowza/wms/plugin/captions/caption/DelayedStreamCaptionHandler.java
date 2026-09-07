@@ -49,7 +49,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private static final Class<DelayedStreamCaptionHandler> CLASS = DelayedStreamCaptionHandler.class;
     private static final String CLASS_NAME = CLASS.getSimpleName();
     private static final int DEFAULT_WORDS_PER_MINUTE = 150;
-    private static final long CAPTION_DISPLAY_OFFSET_MILLIS = 1_000L;
+    private static final long CAPTION_DISPLAY_OFFSET_MILLIS = 0_500L;
 
     private static final int MAX_STREAM_CACHE_SIZE = 100;
 

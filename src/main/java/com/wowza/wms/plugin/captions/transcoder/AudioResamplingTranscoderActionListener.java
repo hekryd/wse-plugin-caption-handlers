@@ -83,12 +83,14 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             return;
         String mappedName  = streamName.replace(".stream", "");
         EventConfig eventConfig = resolveEventConfig(mappedName);
-        if (eventConfig == null)
+        if (eventConfig == null) {
+            onNoCaptionEvent(mappedName);
             return;
+        }
 
         // Only the event's primary caption language needs a speech recognizer.
-        // Both servers create it and gate audio by the shared failover role so a
-        // role switch can happen while this transcoder remains live.
+        // Both servers keep it time-aligned with live audio so a role switch can
+        // happen while this transcoder remains live.
         boolean isMainCaptionLanguage = isMainCaptionLanguage(mappedName, eventConfig);
 
         TranscoderSessionAudio sessionAudio = transcoder.getTranscodingSession().getSessionAudio();
@@ -208,6 +210,12 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
     }
 
     protected void onEventSelected(org.bson.Document eventDoc) {}
+
+    /**
+     * Called when the stream has no caption-enabled event for today. Subclasses
+     * can clear event-specific output such as SMIL caption tracks.
+     */
+    protected void onNoCaptionEvent(String streamName) {}
 
     private static class EventConfig
     {

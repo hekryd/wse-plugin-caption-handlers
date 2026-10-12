@@ -20,15 +20,17 @@ public class AzureCaptionsTranscoderActionListener extends AudioResamplingTransc
     private final String subscriptionKey;
     private final String serviceRegion;
     private final Consumer<Document> eventSelected;
+    private final Consumer<String> noCaptionEvent;
 
     public AzureCaptionsTranscoderActionListener(IApplicationInstance appInstance, Map<String, SpeechHandler> handlers, Map<String, DelayedStream> delayedStreams,
                                                  String subscriptionKey, String serviceRegion, com.wowza.wms.plugin.captions.mongo.Mongo mongo, String eventCollection, String eventKey,
-                                                 Long eventStartAtMillis, Consumer<Document> eventSelected)
+                                                 Long eventStartAtMillis, Consumer<Document> eventSelected, Consumer<String> noCaptionEvent)
     {
         super(appInstance, handlers, delayedStreams, mongo, eventCollection, eventKey, eventStartAtMillis);
         this.subscriptionKey = subscriptionKey;
         this.serviceRegion = serviceRegion;
         this.eventSelected = eventSelected;
+        this.noCaptionEvent = noCaptionEvent;
     }
 
     @Override
@@ -42,5 +44,12 @@ public class AzureCaptionsTranscoderActionListener extends AudioResamplingTransc
     {
         if (eventSelected != null)
             eventSelected.accept(eventDoc);
+    }
+
+    @Override
+    protected void onNoCaptionEvent(String streamName)
+    {
+        if (noCaptionEvent != null)
+            noCaptionEvent.accept(streamName);
     }
 }

@@ -104,7 +104,7 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         {
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
             appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
-                    subscriptionKey, serviceRegion, mongo, "events", null, null, this::configureCaptionsForEvent)));
+                    subscriptionKey, serviceRegion, mongo, "events", null, null, this::configureCaptionsForEvent, this::configureSmilWithoutCaptions)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }
@@ -163,6 +163,33 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
         }
         catch (Exception e) {
             logger.error(MODULE_NAME + ".configureCaptionsForEvent could not create SMIL", e);
+        }
+    }
+
+    private synchronized void configureSmilWithoutCaptions(String streamName)
+    {
+        if (streamName == null)
+            return;
+
+        int separator = streamName.indexOf('_');
+        if (separator <= 0 || separator == streamName.length() - 1) {
+            logger.warn(MODULE_NAME + ".configureSmilWithoutCaptions could not parse stream name: " + streamName);
+            return;
+        }
+
+        String eventInstance = streamName.substring(0, separator);
+        String language = streamName.substring(separator + 1);
+        String smilName = customer + "_" + eventInstance + "_" + language;
+
+        try {
+            String response = SmilApiClient.createSmilForApplication(appInstance, smilName, streamName,
+                    Collections.emptyList(), eventInstance, false, language);
+            logger.info(MODULE_NAME + ".configureSmilWithoutCaptions created caption-free SMIL: " + response);
+            String appResponse = SmilApiClient.updateCaptionLiveIngestLanguages(appInstance, Collections.emptyList());
+            logger.info(MODULE_NAME + ".configureSmilWithoutCaptions cleared caption live ingest languages: " + appResponse);
+        }
+        catch (Exception e) {
+            logger.error(MODULE_NAME + ".configureSmilWithoutCaptions could not create caption-free SMIL for " + streamName, e);
         }
     }
     public void onAppStop(IApplicationInstance appInstance) throws Exception

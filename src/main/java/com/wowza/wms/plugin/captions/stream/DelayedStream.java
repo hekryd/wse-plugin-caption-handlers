@@ -278,6 +278,17 @@ public class DelayedStream
         return startTime - startOffset + timecode + startDelay;
     }
 
+    /**
+     * Converts a wall-clock publish time from another Wowza server to this
+     * delayed stream's timecode. Both servers must use synchronized clocks.
+     * Returns -1 until this stream has received its first source packet.
+     */
+    public long timecodeForEstimatedPublishTimeMillis(long publishTimeMillis)
+    {
+        long offset = startOffset;
+        return offset == -1 ? -1 : publishTimeMillis - startTime + offset - startDelay;
+    }
+
     public long getFirstPacketTimecode()
     {
         return packets.stream()

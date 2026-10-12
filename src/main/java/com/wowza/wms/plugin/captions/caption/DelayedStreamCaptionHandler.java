@@ -62,7 +62,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private final String eventCollectionName;
     private final String eventKey;
     private final Long eventStartAtMillis;
-    private boolean isMainStream = false;
+    private boolean isMainCaptionLanguage = false;
 
     private int wordsPerMinute = DEFAULT_WORDS_PER_MINUTE;
     private final ExecutorService watcherExecutor;
@@ -260,8 +260,8 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         }
                     }
 
-                    this.isMainStream = (detectedLanguageKey != null && streamLanguage != null && streamLanguage.equals(detectedLanguageKey));
-                    logger.info(CLASS_NAME + ".detectMainStream: firstEnabledLanguage=" + detectedLanguageKey + " mainStream=" + this.isMainStream);
+                    this.isMainCaptionLanguage = (detectedLanguageKey != null && streamLanguage != null && streamLanguage.equals(detectedLanguageKey));
+                    logger.info(CLASS_NAME + ".detectMainStream: firstEnabledLanguage=" + detectedLanguageKey + " mainCaptionLanguage=" + this.isMainCaptionLanguage);
                 } catch (Exception e) {
                     logger.error(CLASS_NAME + ".detectMainStream: language detection failed: " + e.getMessage(), e);
                 }
@@ -369,7 +369,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     {
         if (debugLog)
             logger.info(CLASS_NAME + ".handleCaption: caption = " + caption);
-        if (delayedStream == null || !this.isMainStream)
+        if (delayedStream == null || !this.isMainCaptionLanguage || !isCaptionWriter())
             return;
 
         AMFDataObj amfData = new AMFDataObj();
@@ -392,7 +392,7 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
             logger.info(CLASS_NAME + ".handleCaption: packet = " + packet + ", stream buffer: " + delayedStream.getFirstPacketTimecode() + " - " + delayedStream.getLastPacketTimecode());
         delayedStream.writePacket(packet);
 
-        if (mongo != null && mongo.getClient() != null && isMainStream && caption.getText() != null && !caption.getText().isEmpty()) {
+        if (mongo != null && mongo.getClient() != null && isCaptionWriter() && caption.getText() != null && !caption.getText().isEmpty()) {
             try {
                 logger.info(CLASS_NAME + ".handleCaption: main stream found, persisting caption to MongoDB");
                 String captionsDbName = resolveCaptionsDbName();
@@ -550,6 +550,12 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                         if (full == null)
                             continue;
 
+                        if (change.getOperationType() == OperationType.INSERT) {
+                            if (!isCaptionWriter() && isCaptionForThisStream(full))
+                                queueReplicatedCaption(full);
+                            continue;
+                        }
+
                         if (isActualProgramDateTimeUpdate(change))
                             continue;
 
@@ -566,6 +572,94 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
                 logger.error(CLASS_NAME + ".startChangeStreamWatcher: watcher failed: " + e.getMessage(), e);
             }
         });
+    }
+
+    /**
+     * Queue a caption produced by the active peer. The caption records use a
+     * wall-clock publish time, so each server can translate it into its own
+     * delayed-stream timecode without sharing stream-internal counters.
+     */
+    private void queueReplicatedCaption(Document captionDocument)
+    {
+        try {
+        ObjectId id = captionDocument.getObjectId("_id");
+        if (id == null || pendingCaptionById.containsKey(id))
+            return;
+
+        Date publishTime = captionDocument.getDate("programDateTimeStart");
+        if (publishTime == null)
+            publishTime = captionDocument.getDate("publishTime");
+        if (publishTime == null)
+            return;
+
+        long absTimecode = delayedStream.timecodeForEstimatedPublishTimeMillis(publishTime.getTime());
+        if (absTimecode < 0)
+            return;
+
+        long publishedTimecode = delayedStream.getPublishedStreamTimecode();
+        if (publishedTimecode >= absTimecode) {
+            if (debugLog)
+                logger.info(CLASS_NAME + ".queueReplicatedCaption: caption id=" + id
+                        + " arrived after its display time on stream=" + streamName);
+            return;
+        }
+
+        String text = captionDocument.getString("text");
+        String language = captionDocument.getString("language");
+        if (text == null || text.isEmpty() || language == null || language.isEmpty())
+            return;
+
+        int trackId = captionDocument.getInteger("trackId", 99);
+        AMFPacket packet = createCaptionPacket(text, language, trackId, absTimecode);
+        delayedStream.writePacket(packet);
+
+        Date endTime = captionDocument.getDate("programDateTimeEnd");
+        long endAbsTimecode = endTime == null
+                ? absTimecode
+                : absTimecode + Math.max(0L, endTime.getTime() - publishTime.getTime());
+        PendingCaption pendingCaption = new PendingCaption(id, absTimecode, endAbsTimecode,
+                System.currentTimeMillis(), packet);
+        pendingCaptionByAbsTime.computeIfAbsent(absTimecode, key -> new PendingCaptionSlot())
+                .captions.add(pendingCaption);
+        pendingCaptionById.put(id, pendingCaption);
+        pendingActualProgramDateTimeByAbsTime.computeIfAbsent(absTimecode, key -> new PendingCaptionSlot())
+                .captions.add(pendingCaption);
+
+        if (debugLog)
+            logger.info(CLASS_NAME + ".queueReplicatedCaption: queued caption id=" + id
+                    + " from MongoDB for stream=" + streamName + " at timecode=" + absTimecode);
+        }
+        catch (Exception e) {
+            logger.error(CLASS_NAME + ".queueReplicatedCaption: failed to queue shared caption", e);
+        }
+    }
+
+    private boolean isCaptionForThisStream(Document captionDocument)
+    {
+        String captionStream = captionDocument.getString("mainStream");
+        if (captionStream != null)
+            return captionStream.equals(streamName);
+
+        // Older caption records did not include mainStream. Keep language as a
+        // fallback only for those records; a generated caption stream can carry
+        // translated languages as well as its source language.
+        String captionLanguage = captionDocument.getString("language");
+        String streamLanguage = getStreamLanguage();
+        return captionLanguage != null && streamLanguage != null && captionLanguage.equals(streamLanguage);
+    }
+
+    private String getStreamLanguage()
+    {
+        if (streamName == null)
+            return null;
+        int separator = streamName.indexOf('_');
+        return separator >= 0 && separator + 1 < streamName.length()
+                ? streamName.substring(separator + 1) : null;
+    }
+
+    private boolean isCaptionWriter()
+    {
+        return mongo == null || mongo.isCaptionWriter(eventKey);
     }
 
     private boolean isActualProgramDateTimeUpdate(ChangeStreamDocument<Document> change)

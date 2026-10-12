@@ -86,8 +86,10 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         if (eventConfig == null)
             return;
 
-        // Check if this is the main stream based on language detection
-        boolean isMainStream = isMainStream(mappedName, eventConfig);
+        // Only the event's primary caption language needs a speech recognizer.
+        // Both servers create it and gate audio by the shared failover role so a
+        // role switch can happen while this transcoder remains live.
+        boolean isMainCaptionLanguage = isMainCaptionLanguage(mappedName, eventConfig);
 
         TranscoderSessionAudio sessionAudio = transcoder.getTranscodingSession().getSessionAudio();
         SpeechHandler speechHandler = handlers.computeIfAbsent(mappedName, k -> {
@@ -98,9 +100,10 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
                 CaptionHandler captionHandler = DelayedStreamCaptionHandler.create(appInstance, delayedStream, mappedName, mongo,
                         eventConfig.eventCollection, eventConfig.eventKey, eventConfig.eventStartAtMillis);
 
-            // Only create speech handler for main stream
-            if (!isMainStream) {
-                return null; // Non-main streams don't process audio
+            // Non-primary language streams still get a delayed stream and a
+            // Mongo watcher, but never submit audio to speech recognition.
+            if (!isMainCaptionLanguage) {
+                return null;
             }
 
                 SpeechHandler handler = getSpeechHandler(captionHandler ,streamName);
@@ -116,7 +119,9 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
             }
         });
 
-        // Only add frame listener if we have a speech handler (main stream only)
+        // Both recognizers receive audio for the stream lifetime so their speech
+        // offsets stay aligned with the delayed stream. DelayedStreamCaptionHandler
+        // allows only the elected server to publish and persist a result.
         if (speechHandler != null) {
             TranscoderAudioFrameListener frameListener = new TranscoderAudioFrameListener(speechHandler);
             sessionAudio.addFrameListener(frameListener);
@@ -184,17 +189,7 @@ public abstract class AudioResamplingTranscoderActionListener extends CaptionsTr
         return null;
     }
 
-    private boolean isMainStream(String streamName, EventConfig eventConfig) {
-        //wow-03 cant be mainstream only wow-01
-        if (mongo == null)
-            return true; // Default to true if no mongo instance provided
-
-        // If configuration explicitly marks this instance as non-main, don't process audio
-        try {
-            if (!mongo.isMainServer())
-                return false;
-        } catch (Exception ignore) {}
-
+    private boolean isMainCaptionLanguage(String streamName, EventConfig eventConfig) {
         try {
             String streamLanguage = null;
             if (streamName != null) {

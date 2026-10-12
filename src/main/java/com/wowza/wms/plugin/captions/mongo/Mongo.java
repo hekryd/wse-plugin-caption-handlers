@@ -14,9 +14,12 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.security.KeyStore;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 
 public class Mongo {
+    private static final long ROLE_REFRESH_INTERVAL_MILLIS = 1_000L;
     private static final WMSLogger logger = WMSLoggerFactory.getLogger(Mongo.class);
     
     private MongoClient mongoClient;
@@ -29,6 +32,13 @@ public class Mongo {
     private String truststorePassword;
     private boolean allowInvalidHostname = false;
     private boolean mainServer = false;
+    private boolean backupServer = true;
+    private final ConcurrentMap<String, EventRoleState> eventRoles = new ConcurrentHashMap<>();
+
+    private static class EventRoleState {
+        private volatile boolean backupActive;
+        private volatile long nextRefreshAtMillis;
+    }
     
     // Default constructor that loads from properties file
     public Mongo() {
@@ -59,9 +69,7 @@ public class Mongo {
         this.truststorePath = props.getProperty("mongo.truststore.path");
         this.truststorePassword = props.getProperty("mongo.truststore.password");
         this.allowInvalidHostname = Boolean.parseBoolean(props.getProperty("mongo.tls.allowInvalidHostname", "false"));
-        // mainServer controls whether this Wowza instance should process audio
-        // If undefined or not a valid boolean, default to false (don't process audio)
-        this.mainServer = Boolean.parseBoolean(props.getProperty("wowza.mainServer", "false"));
+        configureServerRole(props);
         
         // Validate configuration
         if (connectionString == null || databaseName == null || keystorePath == null || keystorePassword == null) {
@@ -120,6 +128,76 @@ public class Mongo {
 
     public boolean isMainServer() {
         return mainServer;
+    }
+
+    /**
+     * Returns whether this server currently owns speech-to-text generation for an event.
+     * The local server role is configured once in env.properties. The shared
+     * event stream.backup flag is read at most once per second, so changing it
+     * moves generation between the two already-running Wowza instances without
+     * a stream restart.
+     */
+    public boolean isCaptionWriter(String eventKey) {
+        return isBackupActive(eventKey) ? backupServer : mainServer;
+    }
+
+    private void configureServerRole(Properties props) {
+        String configuredRole = props.getProperty("wowza.serverRole", "").trim();
+        if ("primary".equalsIgnoreCase(configuredRole)) {
+            mainServer = true;
+            backupServer = false;
+            return;
+        }
+        if ("backup".equalsIgnoreCase(configuredRole)) {
+            mainServer = false;
+            backupServer = true;
+            return;
+        }
+
+        // Keep the existing wowza.mainServer setting compatible with existing
+        // deployments. In a two-server pair, the non-main instance is the backup.
+        mainServer = Boolean.parseBoolean(props.getProperty("wowza.mainServer", "false"));
+        backupServer = Boolean.parseBoolean(props.getProperty("wowza.backupServer", Boolean.toString(!mainServer)));
+    }
+
+    private boolean isBackupActive(String eventKey) {
+        if (eventKey == null || eventKey.isEmpty() || database == null)
+            return false;
+
+        EventRoleState state = eventRoles.computeIfAbsent(eventKey, key -> new EventRoleState());
+        long now = System.currentTimeMillis();
+        if (now < state.nextRefreshAtMillis)
+            return state.backupActive;
+
+        synchronized (state) {
+            if (now < state.nextRefreshAtMillis)
+                return state.backupActive;
+
+            try {
+                org.bson.Document event = database.getCollection("events")
+                        .find(new org.bson.Document("eventKey", eventKey)).first();
+                if (event != null) {
+                    boolean previousValue = state.backupActive;
+                    state.backupActive = getBackupFlag(event);
+                    if (previousValue != state.backupActive) {
+                        logger.info("Caption failover role changed for event " + eventKey
+                                + ": backup=" + state.backupActive);
+                    }
+                }
+            } catch (Exception e) {
+                logger.warn("Could not refresh caption failover role for event " + eventKey + ": " + e.getMessage());
+            } finally {
+                state.nextRefreshAtMillis = now + ROLE_REFRESH_INTERVAL_MILLIS;
+            }
+        }
+        return state.backupActive;
+    }
+
+    private boolean getBackupFlag(org.bson.Document event) {
+        org.bson.Document stream = event.get("stream", org.bson.Document.class);
+        if (stream != null && stream.containsKey("backup"))
+            return stream.getBoolean("backup", false);
+        return event.getBoolean("backup", false);
     }
     
     public MongoClient getClient() {

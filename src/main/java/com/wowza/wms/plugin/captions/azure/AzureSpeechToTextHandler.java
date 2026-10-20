@@ -16,6 +16,7 @@ import com.wowza.wms.plugin.captions.caption.CaptionHandler;
 import com.wowza.wms.plugin.captions.caption.CaptionHelper;
 import com.wowza.wms.plugin.captions.caption.CaptionTiming;
 import com.wowza.wms.timedtext.model.ITimedTextConstants;
+import com.wowza.wms.transcoder.model.TranscoderNativeAudioFrame;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -57,7 +58,7 @@ public class AzureSpeechToTextHandler implements SpeechHandler
         maxLines = props.getPropertyInt(PROP_MAX_CAPTION_LINE_COUNT, 2);
         this.captionHandler = captionHandler;
         
-      String instanceName = streamName; // e.g., "01_de_1080p"
+      String instanceName = streamName; // e.g., "01_de"
       String[] parts = instanceName.split("_");
 
       // default to en-US if nothing found
@@ -68,6 +69,7 @@ public class AzureSpeechToTextHandler implements SpeechHandler
           "en", "en-US",
           "de", "de-DE",
           "fr", "fr-FR",
+          "nl", "nl-NL",
           "es", "es-ES"
       );
 
@@ -77,7 +79,11 @@ public class AzureSpeechToTextHandler implements SpeechHandler
       if (!isBCP47WithRegion(recognitionLanguage))
           throw new RuntimeException("Invalid recognition language: " + recognitionLanguage);
 
-        String languagesStr = appInstance.getTimedTextProperties().getPropertyStr(PROP_DEFAULT_CAPTION_LANGUAGES, ITimedTextConstants.LANGUAGE_ID_ENGLISH);
+        String enabledCsv = appInstance.getProperties().getPropertyStr("enabled_captions_csv", null);
+        String languagesStr = (enabledCsv == null || enabledCsv.isBlank())
+                ? appInstance.getTimedTextProperties().getPropertyStr(PROP_DEFAULT_CAPTION_LANGUAGES, ITimedTextConstants.LANGUAGE_ID_ENGLISH)
+                : enabledCsv;
+
         languageMap = Arrays.stream(languagesStr.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isBlank())
@@ -223,9 +229,20 @@ public class AzureSpeechToTextHandler implements SpeechHandler
     }
 
     @Override
-    public void addAudioFrame(byte[] frame)
+    public void addAudioFrame(TranscoderNativeAudioFrame frame)
     {
-        audioStream.write(frame);
+        try {
+            audioStream.write(frame.buffer);
+        }
+        catch (IllegalStateException ise)
+        {
+            if (debugLog)
+                logger.warn(MODULE_NAME + "::" + CLASS_NAME + " addAudioFrame: audioStream closed, ignoring frame");
+        }
+        catch (Exception e)
+        {
+            logger.error(MODULE_NAME + "::" + CLASS_NAME + " addAudioFrame exception", e);
+        }
     }
 
     @Override

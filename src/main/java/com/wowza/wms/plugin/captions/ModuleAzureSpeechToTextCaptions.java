@@ -19,6 +19,9 @@ import com.wowza.wms.timedtext.model.ITimedTextConstants;
 
 import java.util.*;
 import java.util.concurrent.*;
+import org.bson.Document;
+import com.wowza.wms.plugin.captions.mongo.Mongo;
+
 
 public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 {
@@ -48,16 +51,31 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
     private DelayedStreamListener delayedStreamListener;
     private String subscriptionKey;
     private String serviceRegion;
+    private Mongo mongo;
+    private String customer;
+    private String liveEventCollection;
+    private String eventKey;
+    private String configuredEventKey;
+    private IApplicationInstance appInstance;
+    private boolean azureConfigured;
+    private int azureDelay = 20000;
+
+
+    //event_config
     private boolean enabled = false;
+    private int added_stream_delay_in_ms = 0;
+    private List<String> enabled_languages =  Arrays.asList("de","en"); 
+    private boolean showCaptionsInEvent = false;
 
     public void onAppCreate(IApplicationInstance appInstance)
     {
         super.onAppCreate(appInstance);
-        enabled = appInstance.getProperties().getPropertyBoolean(PROP_CAPTIONS_ENABLED, enabled);
+        //enabled = appInstance.getProperties().getPropertyBoolean(PROP_CAPTIONS_ENABLED, enabled);
         try
         {
             subscriptionKey = Objects.requireNonNull(appInstance.getProperties().getPropertyStr(PROP_SUBSCRIPTION_KEY), "Azure Speech Subscription Key not set");
             serviceRegion = Objects.requireNonNull(appInstance.getProperties().getPropertyStr(PROP_SERVICE_REGION), "Azure Speech Service Region not set");
+            azureConfigured = true;
         }
         catch (NullPointerException npe)
         {
@@ -69,13 +87,24 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
     public void onAppStart(IApplicationInstance appInstance)
     {
-        if (!enabled)
+        this.appInstance = appInstance;
+        //logger.error(MODULE_NAME + ".onAppStart initializing MongoDB connection");
+        customer = appInstance.getApplication().getName().split("_")[0];
+
+        // New Mongo layout: database is Customer_<customer>, collection is always "events"
+        mongo = new Mongo("Customer_" + customer);
+        if (mongo == null)
+            logger.error(MODULE_NAME + ".onAppStart could not initialize MongoDB connection");
+        mongo.connect();
+
+        if (!azureConfigured)
             return;
+
         try
         {
             appInstance.addLiveStreamPacketizerListener(new LiveStreamPacketizerListener(appInstance));
             appInstance.addLiveStreamTranscoderListener(new CaptionsTranscoderCreateListener(new AzureCaptionsTranscoderActionListener(appInstance, speechHandlers, delayedStreams,
-                    subscriptionKey, serviceRegion)));
+                    subscriptionKey, serviceRegion, mongo, "events", null, null, this::configureCaptionsForEvent, this::configureSmilWithoutCaptions)));
             delayedStreamListener = new DelayedStreamListener(appInstance, delayedStreams);
             appInstance.addMediaCasterListener(delayedStreamListener);
         }
@@ -87,9 +116,94 @@ public class ModuleAzureSpeechToTextCaptions extends ModuleCaptionsBase
 
     public void onStreamCreate(IMediaStream stream)
     {
-        if (!enabled)
+        if (!azureConfigured)
             return;
         stream.addClientListener(delayedStreamListener);
         stream.addLivePacketListener(delayedStreamListener);
     }
+
+    private synchronized void configureCaptionsForEvent(Document eventDoc)
+    {
+        String selectedEventKey = eventDoc.getString("eventKey");
+        if (selectedEventKey == null || selectedEventKey.equals(configuredEventKey))
+            return;
+
+        Document captionConfig = eventDoc.get("captions", Document.class);
+        if (captionConfig == null)
+            return;
+
+        liveEventCollection = "events";
+        eventKey = selectedEventKey;
+        configuredEventKey = selectedEventKey;
+        enabled = captionConfig.getBoolean("enabled", enabled);
+        added_stream_delay_in_ms = captionConfig.getInteger("addedDelayForEditing", added_stream_delay_in_ms) + azureDelay;
+        appInstance.getProperties().setProperty("added_stream_delay_in_ms", added_stream_delay_in_ms);
+
+        enabled_languages = captionConfig.getList("enabledLanguages", String.class);
+        if (enabled_languages == null || enabled_languages.isEmpty())
+            return;
+
+        String enabledCsv = String.join(",", enabled_languages);
+        appInstance.getProperties().setProperty("enabled_captions_csv", enabledCsv);
+        appInstance.getTimedTextProperties().setProperty(PROP_DEFAULT_CAPTION_LANGUAGES, enabledCsv);
+        logger.info(MODULE_NAME + ".configureCaptionsForEvent set enabled_captions_csv: " + enabledCsv);
+
+        showCaptionsInEvent = captionConfig.getBoolean("enabledForEventPage", showCaptionsInEvent);
+        Document streamDoc = eventDoc.get("stream", Document.class);
+        String eventInstance = streamDoc != null && streamDoc.containsKey("instance") ? streamDoc.getString("instance") : "01";
+        try {
+            for (String lang : enabled_languages) {
+                String smilName = customer + "_" + eventInstance + "_" + lang;
+                String baseSrc = eventInstance + "_" + lang;
+                String resp = SmilApiClient.createSmilForApplication(appInstance, smilName, baseSrc, enabled_languages, eventInstance, showCaptionsInEvent, lang);
+                logger.info(MODULE_NAME + ".configureCaptionsForEvent created SMIL: " + resp);
+                String respApplication = SmilApiClient.updateCaptionLiveIngestLanguages(appInstance, enabled_languages);
+                logger.info(MODULE_NAME + ".configureCaptionsForEvent updated application caption live ingest languages: " + respApplication);
+            }
+        }
+        catch (Exception e) {
+            logger.error(MODULE_NAME + ".configureCaptionsForEvent could not create SMIL", e);
+        }
+    }
+
+    private synchronized void configureSmilWithoutCaptions(String streamName)
+    {
+        if (streamName == null)
+            return;
+
+        int separator = streamName.indexOf('_');
+        if (separator <= 0 || separator == streamName.length() - 1) {
+            logger.warn(MODULE_NAME + ".configureSmilWithoutCaptions could not parse stream name: " + streamName);
+            return;
+        }
+
+        String eventInstance = streamName.substring(0, separator);
+        String language = streamName.substring(separator + 1);
+        String smilName = customer + "_" + eventInstance + "_" + language;
+
+        try {
+            String response = SmilApiClient.createSmilForApplication(appInstance, smilName, streamName,
+                    Collections.emptyList(), eventInstance, false, language);
+            logger.info(MODULE_NAME + ".configureSmilWithoutCaptions created caption-free SMIL: " + response);
+            String appResponse = SmilApiClient.updateCaptionLiveIngestLanguages(appInstance, Collections.emptyList());
+            logger.info(MODULE_NAME + ".configureSmilWithoutCaptions cleared caption live ingest languages: " + appResponse);
+        }
+        catch (Exception e) {
+            logger.error(MODULE_NAME + ".configureSmilWithoutCaptions could not create caption-free SMIL for " + streamName, e);
+        }
+    }
+    public void onAppStop(IApplicationInstance appInstance) throws Exception
+    {   
+        //SmilApiClient.deleteSmilForApplication(appInstance);
+        if (mongo != null) {
+            mongo.disconnect();
+            logger.info(MODULE_NAME + ".onAppStop MongoDB connection closed");
+        }
+        else {
+            logger.info(MODULE_NAME + ".onAppStop MongoDB connection was not initialized");
+        }
+        logger.info(MODULE_NAME + ".onAppStop completed");
+
+    }
+
 }

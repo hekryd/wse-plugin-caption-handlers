@@ -8,12 +8,40 @@ package com.wowza.wms.plugin.captions.caption;
 import com.wowza.wms.plugin.captions.stream.DelayedStream;
 import com.wowza.wms.amf.*;
 import com.wowza.wms.application.IApplicationInstance;
+import com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.IHTTPStreamerCupertinoLivePacketizerDataHandler2;
+import com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.LiveStreamPacketizerCupertino;
+import com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.LiveStreamPacketizerCupertinoChunk;
 import com.wowza.wms.logging.*;
 import com.wowza.wms.vhost.IVHost;
+import com.wowza.wms.plugin.captions.mongo.Mongo;
+import com.wowza.wms.stream.livepacketizer.ILiveStreamPacketizer;
+import com.wowza.wms.stream.livepacketizer.ILiveStreamPacketizerActionNotify;
+import com.wowza.wms.stream.livepacketizer.LiveStreamPacketizerActionNotifyBase;
+import org.bson.Document;
 
 import java.time.*;
+import java.util.Date;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Future;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import com.mongodb.client.result.InsertOneResult;
+import org.bson.types.ObjectId;
+
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.model.changestream.FullDocument;
+import com.mongodb.client.model.changestream.ChangeStreamDocument;
+import com.mongodb.client.model.changestream.OperationType;
+import org.bson.Document;
+import com.mongodb.client.MongoCursor;
 
 import static com.wowza.wms.plugin.captions.ModuleCaptionsBase.PROP_CAPTIONS_DEBUG_LOG;
+import static com.wowza.wms.plugin.captions.ModuleCaptionsBase.DELAYED_STREAM_SUFFIX;
 import static com.wowza.wms.plugin.captions.caption.CaptionHelper.dotNetEpoch;
 
 public class DelayedStreamCaptionHandler implements CaptionHandler
@@ -21,17 +49,319 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     private static final Class<DelayedStreamCaptionHandler> CLASS = DelayedStreamCaptionHandler.class;
     private static final String CLASS_NAME = CLASS.getSimpleName();
     private static final int DEFAULT_WORDS_PER_MINUTE = 150;
+    private static final long CAPTION_DISPLAY_OFFSET_MILLIS = 0_500L;
+
+    private static final int MAX_STREAM_CACHE_SIZE = 100;
+
+    private final IApplicationInstance appInstance;
     private final DelayedStream delayedStream;
     private final WMSLogger logger;
     private final boolean debugLog;
+    private final Mongo mongo;
+    private final String streamName;
+    private final String eventCollectionName;
+    private final String eventKey;
+    private final Long eventStartAtMillis;
+    private boolean isMainCaptionLanguage = false;
 
     private int wordsPerMinute = DEFAULT_WORDS_PER_MINUTE;
+    private final ExecutorService watcherExecutor;
 
-    public DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream)
+    // FIX #1: Use AtomicBoolean for compareAndSet to eliminate race condition
+    private final AtomicBoolean watcherRunning = new AtomicBoolean(false);
+
+    // FIX #3: Use ConcurrentHashMap + computeIfAbsent to eliminate non-atomic containsKey/get
+    private final ConcurrentMap<String, String> streamToEventCollection = new ConcurrentHashMap<>();
+
+    private static class PendingCaption {
+        final ObjectId id;
+        final long absTimecode;
+        final long endAbsTimecode;
+        final long insertedAt;
+        volatile AMFPacket packet;
+
+        PendingCaption(ObjectId id, long absTimecode, long endAbsTimecode, long insertedAt, AMFPacket packet) {
+            this.id = id;
+            this.absTimecode = absTimecode;
+            this.endAbsTimecode = endAbsTimecode;
+            this.insertedAt = insertedAt;
+            this.packet = packet;
+        }
+    }
+
+    // FIX #2: Wrap key in a value object to handle timecode collisions explicitly
+    private static class PendingCaptionSlot {
+        // Use a small list to handle multiple captions at the same absolute timecode
+        final java.util.concurrent.ConcurrentLinkedQueue<PendingCaption> captions = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    }
+    private final ConcurrentMap<Long, PendingCaptionSlot> pendingCaptionByAbsTime = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, PendingCaptionSlot> pendingActualProgramDateTimeByAbsTime = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ObjectId, PendingCaption> pendingCaptionById = new ConcurrentHashMap<>();
+    private final ILiveStreamPacketizerActionNotify actualProgramDateTimePacketizerListener;
+
+    private final ScheduledExecutorService cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "CaptionPendingCleanup"));
+    private ScheduledFuture<?> cleanupFuture;
+    private volatile MongoCursor<ChangeStreamDocument<Document>> watcherCursor;
+    private volatile Future<?> watcherFuture;
+
+    // FIX #4: Private constructor — use static factory to separate init from thread/DB work
+    private DelayedStreamCaptionHandler(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey,Long eventStartAtMillis)
     {
+        this.appInstance = appInstance;
         this.delayedStream = delayedStream;
         logger = WMSLoggerFactory.getLoggerObj(DelayedStreamCaptionHandler.class, appInstance);
         debugLog = appInstance.getProperties().getPropertyBoolean(PROP_CAPTIONS_DEBUG_LOG, false);
+        this.streamName = streamName;
+        this.mongo = mongo;
+        this.eventCollectionName = eventCollectionName;
+        this.eventKey = eventKey;
+        this.eventStartAtMillis = eventStartAtMillis;
+        this.watcherExecutor = Executors.newSingleThreadExecutor(r -> new Thread(r, "CaptionChangeWatcher-" + streamName));
+        this.actualProgramDateTimePacketizerListener = new LiveStreamPacketizerActionNotifyBase() {
+            @Override
+            public void onLiveStreamPacketizerCreate(ILiveStreamPacketizer packetizer, String packetizerStreamName) {
+                if (!(packetizer instanceof LiveStreamPacketizerCupertino)
+                        || !((delayedStream.getStreamName() + DELAYED_STREAM_SUFFIX).equals(packetizerStreamName)))
+                    return;
+
+                LiveStreamPacketizerCupertino cupertino = (LiveStreamPacketizerCupertino) packetizer;
+                IHTTPStreamerCupertinoLivePacketizerDataHandler2 existingHandler = cupertino.getDataHandler2();
+                cupertino.setDataHandler(new IHTTPStreamerCupertinoLivePacketizerDataHandler2() {
+                    @Override
+                    public void onFillChunkStart(LiveStreamPacketizerCupertinoChunk chunk) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkStart(chunk);
+                    }
+
+                    @Override
+                    public void onFillChunkEnd(LiveStreamPacketizerCupertinoChunk chunk, long timecode) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkEnd(chunk, timecode);
+                        persistActualProgramDateTimes(chunk);
+                    }
+
+                    @Override
+                    public void onFillChunkDataPacket(LiveStreamPacketizerCupertinoChunk chunk,
+                                                      com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.CupertinoPacketHolder holder,
+                                                      AMFPacket packet,
+                                                      com.wowza.wms.media.mp3.model.idtags.ID3Frames id3Frames) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkDataPacket(chunk, holder, packet, id3Frames);
+                    }
+
+                    @Override
+                    public void onFillChunkMediaPacket(LiveStreamPacketizerCupertinoChunk chunk,
+                                                       com.wowza.wms.httpstreamer.cupertinostreaming.livestreampacketizer.CupertinoPacketHolder holder,
+                                                       AMFPacket packet) {
+                        if (existingHandler != null)
+                            existingHandler.onFillChunkMediaPacket(chunk, holder, packet);
+                    }
+                });
+            }
+        };
+    }
+
+    /**
+     * FIX #4: Static factory method — separates field init from thread/DB operations.
+     * Throws IllegalStateException on failure so callers cannot accidentally use a null
+     * reference. Resources are always cleaned up before the exception propagates.
+     */
+    public static DelayedStreamCaptionHandler create(IApplicationInstance appInstance, DelayedStream delayedStream, String streamName, Mongo mongo, String eventCollectionName, String eventKey,Long eventStartAtMillis)
+    {
+        DelayedStreamCaptionHandler handler = new DelayedStreamCaptionHandler(appInstance, delayedStream, streamName, mongo, eventCollectionName, eventKey, eventStartAtMillis);
+        try {
+            handler.init();
+        } catch (Exception e) {
+            handler.logger.error(CLASS_NAME + ".create: init failed, releasing resources: " + e.getMessage(), e);
+            try { handler.close(); } catch (Exception ignore) {}
+            throw new IllegalStateException(CLASS_NAME + ".create: failed to initialise handler for stream '" + streamName + "'", e);
+        }
+        return handler;
+    }
+
+    private void init()
+    {
+        detectMainStream();
+
+        if (this.mongo != null && this.mongo.getDatabase() != null) {
+            startChangeStreamWatcher();
+            startPendingCleanupTask();
+        }
+
+        appInstance.addLiveStreamPacketizerListener(actualProgramDateTimePacketizerListener);
+        registerPublishListener();
+    }
+
+    private void detectMainStream()
+    {
+        try {
+            String streamLanguage = null;
+            try {
+                if (streamName != null) {
+                    String[] parts = streamName.split("_");
+                    if (parts.length > 1)
+                        streamLanguage = parts[1];
+                }
+            } catch (Exception ignored) {}
+
+            if (this.mongo != null && this.mongo.getDatabase() != null) {
+                try {
+                    String eventColl = this.eventCollectionName != null ? this.eventCollectionName : resolveEventCollectionForStream();
+
+                    // The first top-level enabledLanguages entry is the configured main caption
+                    // language; the order of keys in the unrelated languages document is not a
+                    // configuration contract.
+                    org.bson.Document foundEvent = null;
+                    try {
+                        var coll = this.mongo.getDatabase().getCollection(eventColl);
+                        if (this.eventKey != null) {
+                            foundEvent = coll.find(new org.bson.Document("eventKey", this.eventKey)).first();
+                        }
+
+                        if (foundEvent == null) {
+                        for (org.bson.Document doc : coll.find()) {
+                            try {
+                                // Match by stream.instance when possible
+                                org.bson.Document streamDoc = doc.get("stream", org.bson.Document.class);
+                                if (streamDoc != null && streamLanguage != null) {
+                                    String instancePart = null;
+                                    try {
+                                        String[] parts = streamName.split("_");
+                                        if (parts.length > 0) instancePart = parts[0];
+                                    } catch (Exception ignore) {}
+                                    if (instancePart != null && streamDoc.containsKey("instance") && instancePart.equals(streamDoc.getString("instance"))) {
+                                        foundEvent = doc;
+                                        break;
+                                    }
+                                }
+
+                                // Fallback: check if the languages object contains the stream language key
+                                if (streamLanguage != null && doc.containsKey("languages")) {
+                                    org.bson.Document languages = doc.get("languages", org.bson.Document.class);
+                                    if (languages != null && languages.containsKey(streamLanguage)) {
+                                        foundEvent = doc;
+                                        break;
+                                    }
+                                }
+                            } catch (Exception ignore) {}
+                        }
+                        }
+                    } catch (Exception ignore) {}
+
+                    String detectedLanguageKey = null;
+                    if (foundEvent != null) {
+                        try {
+                            java.util.List<String> enabledLanguages = foundEvent.getList("enabledLanguages", String.class);
+                            if (enabledLanguages != null && !enabledLanguages.isEmpty()) {
+                                detectedLanguageKey = enabledLanguages.get(0);
+                            }
+                        } catch (Exception e) {
+                            logger.error(CLASS_NAME + ".detectMainStream: enabledLanguages parsing error", e);
+                        }
+                    }
+
+                    this.isMainCaptionLanguage = (detectedLanguageKey != null && streamLanguage != null && streamLanguage.equals(detectedLanguageKey));
+                    logger.info(CLASS_NAME + ".detectMainStream: firstEnabledLanguage=" + detectedLanguageKey + " mainCaptionLanguage=" + this.isMainCaptionLanguage);
+                } catch (Exception e) {
+                    logger.error(CLASS_NAME + ".detectMainStream: language detection failed: " + e.getMessage(), e);
+                }
+            }
+        } catch (Exception e) {
+            logger.error(CLASS_NAME + ".detectMainStream: error detecting main stream: " + e.getMessage(), e);
+        }
+    }
+
+    private void registerPublishListener()
+    {
+        try {
+            this.delayedStream.setPublishListener((absTimecode, packet) -> {
+                try {
+                    // FIX: Use merge() to atomically drain one caption from the slot.
+                    // remove() + put() was a race: handleCaption could computeIfAbsent a new slot
+                    // between those two calls and the put() would silently overwrite it.
+                    final ObjectId[] captionIdHolder = { null };
+                    pendingCaptionByAbsTime.compute(absTimecode, (k, slot) -> {
+                        if (slot == null) return null;
+                        PendingCaption pc = slot.captions.poll();
+                        if (pc != null) captionIdHolder[0] = pc.id;
+                        // return null to remove the entry if the queue is now empty,
+                        // or the slot (with remaining items) if it still has entries
+                        return slot.captions.isEmpty() ? null : slot;
+                    });
+                    ObjectId id = captionIdHolder[0];
+
+                    String captionsDbName = resolveCaptionsDbName();
+                    String eventCollection = eventKey;
+
+                    if (id != null) {
+                        pendingCaptionById.remove(id);
+                        mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
+                                .updateOne(new Document("_id", id), new Document("$set", new Document("published", true).append("actualPublishTime", new Date())));
+                        if (debugLog)
+                            logger.info(CLASS_NAME + ".publishListener: marked published for id=" + id + " db=" + captionsDbName + " coll=" + eventCollection);
+                    } else {
+                        // Fallback: find by publishTime within a small range
+                        try {
+                            long publishMillisWallClock = delayedStream.estimatedPublishTimeMillis(absTimecode);
+                            long from = publishMillisWallClock - 1000L;
+                            long to = publishMillisWallClock + 1000L;
+                            Document timeRange = new Document("$gte", new Date(from)).append("$lte", new Date(to));
+                            Document filter = new Document("publishTime", timeRange).append("published", new Document("$ne", true));
+                            var updateRes = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection)
+                                    .updateOne(filter, new Document("$set", new Document("published", true).append("actualPublishTime", new Date())));
+                            if (debugLog)
+                                logger.info(CLASS_NAME + ".publishListener: fallback update by time range for absTimecode=" + absTimecode
+                                        + " db=" + captionsDbName + " coll=" + eventCollection
+                                        + " modifiedCount=" + (updateRes != null ? updateRes.getModifiedCount() : 0));
+                        } catch (Exception ex) {
+                            logger.error(CLASS_NAME + ".publishListener: fallback update failed: " + ex.getMessage(), ex);
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.error(CLASS_NAME + ".publishListener: error marking shown: " + e.getMessage(), e);
+                }
+            });
+        } catch (Exception e) {
+            logger.error(CLASS_NAME + ".registerPublishListener: failed to register publish listener: " + e.getMessage(), e);
+        }
+    }
+
+    private void persistActualProgramDateTimes(LiveStreamPacketizerCupertinoChunk chunk)
+    {
+        if (mongo == null || mongo.getClient() == null || chunk.getProgramDateTime() == null || chunk.getDataPackets() == null)
+            return;
+
+        final Instant chunkProgramDateTime;
+        try {
+            chunkProgramDateTime = OffsetDateTime.parse(chunk.getProgramDateTime()).toInstant();
+        } catch (Exception e) {
+            logger.warn(CLASS_NAME + ".persistActualProgramDateTimes: invalid chunk program date/time '" + chunk.getProgramDateTime() + "'");
+            return;
+        }
+
+        for (AMFPacket packet : chunk.getDataPackets()) {
+            if (packet == null)
+                continue;
+
+            PendingCaptionSlot slot = pendingActualProgramDateTimeByAbsTime.remove(packet.getAbsTimecode());
+            if (slot == null)
+                continue;
+
+            Instant captionStart = chunkProgramDateTime.plusMillis(packet.getAbsTimecode() - chunk.getStartTimecode());
+            PendingCaption pendingCaption;
+            while ((pendingCaption = slot.captions.poll()) != null) {
+                try {
+                    Instant captionEnd = captionStart.plusMillis(pendingCaption.endAbsTimecode - packet.getAbsTimecode());
+                    mongo.getClient().getDatabase(resolveCaptionsDbName()).getCollection(eventKey).updateOne(
+                            new Document("_id", pendingCaption.id),
+                            new Document("$set", new Document("hlsChunkProgramDateTime", chunk.getProgramDateTime())
+                                    .append("actualProgramDateTimeStart", Date.from(captionStart))
+                                    .append("actualProgramDateTimeEnd", Date.from(captionEnd))));
+                } catch (Exception e) {
+                    logger.error(CLASS_NAME + ".persistActualProgramDateTimes: failed to store HLS program date/time", e);
+                }
+            }
+        }
     }
 
     @Override
@@ -39,8 +369,9 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
     {
         if (debugLog)
             logger.info(CLASS_NAME + ".handleCaption: caption = " + caption);
-        if (delayedStream == null)
+        if (delayedStream == null || !this.isMainCaptionLanguage || !isCaptionWriter())
             return;
+
         AMFDataObj amfData = new AMFDataObj();
         amfData.put("text", new AMFDataItem(caption.getText()));
         amfData.put("language", new AMFDataItem(caption.getLanguage()));
@@ -52,12 +383,114 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         byte[] data = dataList.serialize();
 
         long startOffset = delayedStream.getStartOffset();
-        long captionOffset = caption.getBegin();
+        // Shift the whole cue, rather than only its start, so its duration is preserved.
+        long captionOffset = caption.getBegin() + CAPTION_DISPLAY_OFFSET_MILLIS;
+        long captionEndOffset = caption.getEnd() + CAPTION_DISPLAY_OFFSET_MILLIS;
         AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, data);
         packet.setAbsTimecode(startOffset + captionOffset);
         if (debugLog)
-            logger.info(CLASS_NAME + ".handleCaption: packet = " + packet);
+            logger.info(CLASS_NAME + ".handleCaption: packet = " + packet + ", stream buffer: " + delayedStream.getFirstPacketTimecode() + " - " + delayedStream.getLastPacketTimecode());
         delayedStream.writePacket(packet);
+
+        if (mongo != null && mongo.getClient() != null && isCaptionWriter() && caption.getText() != null && !caption.getText().isEmpty()) {
+            try {
+                logger.info(CLASS_NAME + ".handleCaption: main stream found, persisting caption to MongoDB");
+                String captionsDbName = resolveCaptionsDbName();
+
+                long systemTime = System.currentTimeMillis();
+                // the publish timestamp rounded to a small window and the caption start.
+                long publishMillis = startOffset + captionOffset;
+                long programDateTimeStartMillis = delayedStream.estimatedPublishTimeMillis(publishMillis);
+                long programDateTimeEndMillis = delayedStream.estimatedPublishTimeMillis(startOffset + captionEndOffset);
+
+                Document doc = new Document()
+                    // Caption identity and content
+                    .append("mainStream", streamName)
+                    .append("language", caption.getLanguage())
+                    .append("text", caption.getText())
+                    .append("trackId", caption.getTrackId())
+
+                    // Original speech/video timing
+                    .append("videoTimecode", captionOffset)
+                    .append("startTime", Date.from(CaptionHelper.epochInstantFromMillis(captionOffset)))
+                    .append("endTime", Date.from(CaptionHelper.epochInstantFromMillis(captionEndOffset)))
+
+                    // Estimated HLS display timing, available immediately
+                    .append("programDateTimeStart", new Date(programDateTimeStartMillis))
+                    .append("programDateTimeEnd", new Date(programDateTimeEndMillis))
+                    .append("publishTime", new Date(programDateTimeStartMillis))
+
+                    // Database audit timing
+                    .append("systemTime", systemTime)
+                    .append("createdAt", new Date());
+
+                // Only persist captions if the event's startAt is in the past (event already started)
+                boolean shouldPersist = true;
+                long now = System.currentTimeMillis();
+                try {
+                    if (this.eventStartAtMillis != null) {
+                        if (this.eventStartAtMillis > now) {
+                            shouldPersist = false;
+                            if (debugLog) logger.info(CLASS_NAME + ".handleCaption: event startAt (passed) is in the future (" + new Date(this.eventStartAtMillis) + ") - skipping DB persist");
+                        }
+                    } else {
+                        var eventsDb = mongo.getDatabase();
+                        if (eventsDb != null) {
+                            var evtColl = eventsDb.getCollection(eventKey);
+                            Document eventDoc = evtColl.find().first();
+                            if (eventDoc != null) {
+                                Date startAtDate = null;
+                                if (eventDoc.containsKey("startAt")) {
+                                    Object startAtValue = eventDoc.get("startAt");
+                                    if (startAtValue instanceof Date) startAtDate = (Date) startAtValue;
+                                    else if (startAtValue instanceof Number) startAtDate = new Date(((Number) startAtValue).longValue());
+                                    else if (startAtValue instanceof String) {
+                                        try { startAtDate = Date.from(java.time.Instant.parse((String) startAtValue)); } catch (Exception ignore) {}
+                                    }
+                                }
+
+                                if (startAtDate != null) {
+                                    if (startAtDate.getTime() > now) {
+                                        shouldPersist = false;
+                                        if (debugLog) logger.info(CLASS_NAME + ".handleCaption: event startAt is in the future (" + startAtDate + ") - skipping DB persist");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.warn(CLASS_NAME + ".handleCaption: failed to resolve event startAt, defaulting to persist: " + e.getMessage());
+                }
+
+                InsertOneResult res = null;
+                if (shouldPersist) {
+                    res = mongo.getClient().getDatabase(captionsDbName).getCollection(eventKey).insertOne(doc);
+                } else {
+                    if (debugLog) logger.info(CLASS_NAME + ".handleCaption: skipped persisting caption because event hasn't started");
+                }
+
+                if (res != null && res.getInsertedId() != null) {
+                    ObjectId id = res.getInsertedId().asObjectId().getValue();
+                    long absTime = startOffset + captionOffset;
+
+                    // FIX #2: Use computeIfAbsent + queue to safely accumulate multiple captions at the same timecode
+                    PendingCaptionSlot slot = pendingCaptionByAbsTime.computeIfAbsent(absTime, k -> new PendingCaptionSlot());
+                    PendingCaption pendingCaption = new PendingCaption(id, absTime, startOffset + captionEndOffset, System.currentTimeMillis(), packet);
+                    slot.captions.add(pendingCaption);
+                    pendingCaptionById.put(id, pendingCaption);
+                    pendingActualProgramDateTimeByAbsTime
+                            .computeIfAbsent(absTime, k -> new PendingCaptionSlot())
+                            .captions.add(pendingCaption);
+
+                    if (debugLog)
+                        logger.info(CLASS_NAME + ".handleCaption: persisted caption id=" + id + " absTime=" + absTime + " DB=" + captionsDbName + " coll=" + eventKey);
+                } else {
+                    logger.info(CLASS_NAME + ".handleCaption: persisted caption to MongoDB DB=" + captionsDbName + " collection=" + eventKey);
+                }
+            } catch (Exception e) {
+                logger.error(CLASS_NAME + ".handleCaption: failed to persist caption: " + e.getMessage(), e);
+            }
+        }
     }
 
     @Override
@@ -80,5 +513,407 @@ public class DelayedStreamCaptionHandler implements CaptionHandler
         Instant start = dotNetEpoch.plusMillis(firstTC - startOffset);
         Instant end = dotNetEpoch.plusMillis(lastTC - startOffset);
         return new CaptionTiming(start, end);
+    }
+
+    private void startChangeStreamWatcher() {
+        // FIX #1: compareAndSet ensures only one watcher thread ever starts, atomically
+        if (!watcherRunning.compareAndSet(false, true)) return;
+
+        watcherFuture = watcherExecutor.submit(() -> {
+            try {
+                String captionsDbName = resolveCaptionsDbName();
+                String eventCollection = eventKey;
+                MongoCollection<Document> coll = mongo.getClient().getDatabase(captionsDbName).getCollection(eventCollection);
+                var changeStream = coll.watch().fullDocument(FullDocument.UPDATE_LOOKUP);
+                MongoCursor<ChangeStreamDocument<Document>> cursor = null;
+                try {
+                    cursor = changeStream.iterator();
+                    watcherCursor = cursor;
+                    while (watcherRunning.get()) {
+                        ChangeStreamDocument<Document> change = null;
+                        try {
+                            change = cursor.tryNext();
+                        } catch (NoSuchMethodError | UnsupportedOperationException ignored) {
+                            if (!watcherRunning.get()) break;
+                            if (!cursor.hasNext()) {
+                                Thread.sleep(200);
+                                continue;
+                            }
+                            change = cursor.next();
+                        }
+                        if (change == null) {
+                            Thread.sleep(200);
+                            continue;
+                        }
+
+                        Document full = change.getFullDocument();
+                        if (full == null)
+                            continue;
+
+                        if (change.getOperationType() == OperationType.INSERT) {
+                            if (!isCaptionWriter() && isCaptionForThisStream(full))
+                                queueReplicatedCaption(full);
+                            continue;
+                        }
+
+                        if (isActualProgramDateTimeUpdate(change))
+                            continue;
+
+                        ObjectId captionId = full.getObjectId("_id");
+                        if (isCaptionContentUpdate(change, captionId)) {
+                            replacePendingCaption(captionId, full);
+                        }
+                    }
+                } finally {
+                    try { if (cursor != null) cursor.close(); } catch (Exception ignore) {}
+                    watcherCursor = null;
+                }
+            } catch (Exception e) {
+                logger.error(CLASS_NAME + ".startChangeStreamWatcher: watcher failed: " + e.getMessage(), e);
+            }
+        });
+    }
+
+    /**
+     * Queue a caption produced by the active peer. The caption records use a
+     * wall-clock publish time, so each server can translate it into its own
+     * delayed-stream timecode without sharing stream-internal counters.
+     */
+    private void queueReplicatedCaption(Document captionDocument)
+    {
+        try {
+        ObjectId id = captionDocument.getObjectId("_id");
+        if (id == null || pendingCaptionById.containsKey(id))
+            return;
+
+        Date publishTime = captionDocument.getDate("programDateTimeStart");
+        if (publishTime == null)
+            publishTime = captionDocument.getDate("publishTime");
+        if (publishTime == null)
+            return;
+
+        long absTimecode = delayedStream.timecodeForEstimatedPublishTimeMillis(publishTime.getTime());
+        if (absTimecode < 0)
+            return;
+
+        long publishedTimecode = delayedStream.getPublishedStreamTimecode();
+        if (publishedTimecode >= absTimecode) {
+            if (debugLog)
+                logger.info(CLASS_NAME + ".queueReplicatedCaption: caption id=" + id
+                        + " arrived after its display time on stream=" + streamName);
+            return;
+        }
+
+        String text = captionDocument.getString("text");
+        String language = captionDocument.getString("language");
+        if (text == null || text.isEmpty() || language == null || language.isEmpty())
+            return;
+
+        int trackId = captionDocument.getInteger("trackId", 99);
+        AMFPacket packet = createCaptionPacket(text, language, trackId, absTimecode);
+        delayedStream.writePacket(packet);
+
+        Date endTime = captionDocument.getDate("programDateTimeEnd");
+        long endAbsTimecode = endTime == null
+                ? absTimecode
+                : absTimecode + Math.max(0L, endTime.getTime() - publishTime.getTime());
+        PendingCaption pendingCaption = new PendingCaption(id, absTimecode, endAbsTimecode,
+                System.currentTimeMillis(), packet);
+        pendingCaptionByAbsTime.computeIfAbsent(absTimecode, key -> new PendingCaptionSlot())
+                .captions.add(pendingCaption);
+        pendingCaptionById.put(id, pendingCaption);
+        pendingActualProgramDateTimeByAbsTime.computeIfAbsent(absTimecode, key -> new PendingCaptionSlot())
+                .captions.add(pendingCaption);
+
+        if (debugLog)
+            logger.info(CLASS_NAME + ".queueReplicatedCaption: queued caption id=" + id
+                    + " from MongoDB for stream=" + streamName + " at timecode=" + absTimecode);
+        }
+        catch (Exception e) {
+            logger.error(CLASS_NAME + ".queueReplicatedCaption: failed to queue shared caption", e);
+        }
+    }
+
+    private boolean isCaptionForThisStream(Document captionDocument)
+    {
+        String captionStream = captionDocument.getString("mainStream");
+        if (captionStream != null)
+            return captionStream.equals(streamName);
+
+        // Older caption records did not include mainStream. Keep language as a
+        // fallback only for those records; a generated caption stream can carry
+        // translated languages as well as its source language.
+        String captionLanguage = captionDocument.getString("language");
+        String streamLanguage = getStreamLanguage();
+        return captionLanguage != null && streamLanguage != null && captionLanguage.equals(streamLanguage);
+    }
+
+    private String getStreamLanguage()
+    {
+        if (streamName == null)
+            return null;
+        int separator = streamName.indexOf('_');
+        return separator >= 0 && separator + 1 < streamName.length()
+                ? streamName.substring(separator + 1) : null;
+    }
+
+    private boolean isCaptionWriter()
+    {
+        return mongo == null || mongo.isCaptionWriter(eventKey);
+    }
+
+    private boolean isActualProgramDateTimeUpdate(ChangeStreamDocument<Document> change)
+    {
+        if (change.getOperationType() != OperationType.UPDATE || change.getUpdateDescription() == null)
+            return false;
+
+        org.bson.BsonDocument updatedFields = change.getUpdateDescription().getUpdatedFields();
+        return updatedFields != null && !updatedFields.isEmpty()
+                && updatedFields.keySet().stream().allMatch(field -> field.equals("hlsChunkProgramDateTime")
+                || field.equals("actualProgramDateTimeStart") || field.equals("actualProgramDateTimeEnd"));
+    }
+
+    /**
+     * A publish/audit update must not be mistaken for an edit. Only a change to
+     * data carried by the timed-text packet can replace a queued caption.
+     */
+    private boolean isCaptionContentUpdate(ChangeStreamDocument<Document> change, ObjectId captionId)
+    {
+        if (captionId == null || !pendingCaptionById.containsKey(captionId))
+            return false;
+
+        if (change.getOperationType() == OperationType.REPLACE)
+            return true;
+        if (change.getOperationType() != OperationType.UPDATE || change.getUpdateDescription() == null)
+            return false;
+
+        org.bson.BsonDocument updatedFields = change.getUpdateDescription().getUpdatedFields();
+        return updatedFields != null && (updatedFields.containsKey("text")
+                || updatedFields.containsKey("language")
+                || updatedFields.containsKey("trackId"));
+    }
+
+    private void replacePendingCaption(ObjectId captionId, Document captionDocument)
+    {
+        try {
+            PendingCaption pendingCaption = pendingCaptionById.get(captionId);
+            if (pendingCaption == null)
+                return;
+
+            String language = captionDocument.getString("language");
+            String text = captionDocument.getString("text");
+            int trackId = captionDocument.getInteger("trackId", 99);
+            AMFPacket replacement = createCaptionPacket(text, language, trackId, pendingCaption.absTimecode);
+
+            if (delayedStream.replacePendingPacket(pendingCaption.packet, replacement)) {
+                pendingCaption.packet = replacement;
+                if (debugLog)
+                    logger.info(CLASS_NAME + ".changeWatcher: replaced pending caption id=" + captionId
+                            + " at timecode=" + pendingCaption.absTimecode + " stream=" + streamName);
+            } else {
+                // The packet has already been sent. Do not append an out-of-time edit.
+                pendingCaptionById.remove(captionId, pendingCaption);
+                if (debugLog)
+                    logger.info(CLASS_NAME + ".changeWatcher: caption id=" + captionId + " was already published; edit was not inserted");
+            }
+        } catch (Exception e) {
+            logger.error(CLASS_NAME + ".changeWatcher: failed to replace pending caption: " + e.getMessage(), e);
+        }
+    }
+
+    private AMFPacket createCaptionPacket(String text, String language, int trackId, long absTimecode)
+    {
+        AMFDataObj amfData = new AMFDataObj();
+        amfData.put("text", new AMFDataItem(text));
+        amfData.put("language", new AMFDataItem(language));
+        amfData.put("trackid", new AMFDataItem(trackId));
+
+        AMFDataList dataList = new AMFDataList();
+        dataList.add(new AMFDataItem("onTextData"));
+        dataList.add(amfData);
+
+        AMFPacket packet = new AMFPacket(IVHost.CONTENTTYPE_DATA, 0, dataList.serialize());
+        packet.setAbsTimecode(absTimecode);
+        return packet;
+    }
+
+    public void stopChangeStreamWatcher() {
+        watcherRunning.set(false);
+        try {
+            if (watcherCursor != null) {
+                try { watcherCursor.close(); } catch (Exception ignore) {}
+            }
+            if (watcherFuture != null) {
+                watcherFuture.cancel(true);
+            }
+            watcherExecutor.shutdownNow();
+            watcherExecutor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignore) {}
+    }
+
+    private void startPendingCleanupTask() {
+        try {
+            long retentionMillis = TimeUnit.MINUTES.toMillis(10);
+            cleanupFuture = cleanupExecutor.scheduleAtFixedRate(() -> {
+                try {
+                    long now = System.currentTimeMillis();
+
+                    // Cleanup pending captions
+                    var iterator = pendingCaptionByAbsTime.entrySet().iterator();
+                    while (iterator.hasNext()) {
+                        var entry = iterator.next();
+                        PendingCaptionSlot slot = entry.getValue();
+                        if (slot != null) {
+                            // Remove individual expired entries from the slot queue
+                            slot.captions.removeIf(pc -> {
+                                boolean expired = pc != null && (now - pc.insertedAt) > retentionMillis;
+                                if (expired)
+                                    pendingCaptionById.remove(pc.id, pc);
+                                return expired;
+                            });
+                            // Remove the slot entirely if it's empty
+                            if (slot.captions.isEmpty()) {
+                                iterator.remove();
+                            }
+                        } else {
+                            iterator.remove();
+                        }
+                    }
+
+                    var actualProgramDateTimeIterator = pendingActualProgramDateTimeByAbsTime.entrySet().iterator();
+                    while (actualProgramDateTimeIterator.hasNext()) {
+                        var entry = actualProgramDateTimeIterator.next();
+                        PendingCaptionSlot slot = entry.getValue();
+                        if (slot != null) {
+                            slot.captions.removeIf(pc -> pc != null && (now - pc.insertedAt) > retentionMillis);
+                            if (slot.captions.isEmpty()) {
+                                actualProgramDateTimeIterator.remove();
+                            }
+                        } else {
+                            actualProgramDateTimeIterator.remove();
+                        }
+                    }
+
+                } catch (Exception e) {
+                    if (debugLog)
+                        logger.warn(CLASS_NAME + ".cleanupTask: error during cleanup: " + e.getMessage());
+                }
+            }, 1, 1, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            if (debugLog)
+                logger.warn(CLASS_NAME + ".startPendingCleanupTask: " + e.getMessage());
+        }
+    }
+
+    public void close() {
+        try { stopChangeStreamWatcher(); } catch (Exception ignore) {}
+        try { appInstance.removeLiveStreamPacketizerListener(actualProgramDateTimePacketizerListener); } catch (Exception ignore) {}
+        try { delayedStream.setPublishListener(null); } catch (Exception ignore) {}
+        try {
+            if (cleanupFuture != null) cleanupFuture.cancel(true);
+            cleanupExecutor.shutdownNow();
+            cleanupExecutor.awaitTermination(3, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception ignore) {}
+        try { pendingCaptionByAbsTime.clear(); } catch (Exception ignore) {}
+        try { pendingActualProgramDateTimeByAbsTime.clear(); } catch (Exception ignore) {}
+        try { pendingCaptionById.clear(); } catch (Exception ignore) {}
+        try { streamToEventCollection.clear(); } catch (Exception ignore) {}
+    }
+
+    /**
+     * FIX: resolveEventCollectionForStream no longer uses computeIfAbsent for the cache lookup.
+     * computeIfAbsent holds a map-bucket lock for the entire duration of the lambda, which would
+     * stall any other thread hashing to the same bucket while MongoDB I/O is in flight.
+     * Instead we do the lookup unconditionally then use putIfAbsent — only the winning value
+     * is stored, and the map is never locked during network calls.
+     *
+     * FIX #6b: The JSON substring fallback is replaced with strict field-only checks to
+     * prevent false positives where the stream name appears as a substring of unrelated values.
+     */
+    private String resolveEventCollectionForStream() {
+        String cached = streamToEventCollection.get(streamName);
+        if (cached != null) return cached;
+
+        String resolved = lookupCollectionInMongo(streamName);
+
+        // putIfAbsent: if another thread beat us here, use their result and discard ours
+        String existing = streamToEventCollection.putIfAbsent(streamName, resolved);
+        return existing != null ? existing : resolved;
+    }
+
+    private String lookupCollectionInMongo(String key) {
+        if (mongo == null || mongo.getDatabase() == null)
+            return key;
+
+        try {
+            var eventsDb = mongo.getDatabase();
+            // Prefer the new single-collection layout
+            try {
+                var names = eventsDb.listCollectionNames().into(new java.util.ArrayList<>());
+                if (names.contains("events")) return "events";
+            } catch (Exception ignore) {}
+
+            for (String collName : eventsDb.listCollectionNames()) {
+                try {
+                    Document eventConfig = eventsDb.getCollection(collName).find(new Document("_id", "event_config")).first();
+                    if (eventConfig == null)
+                        continue;
+                    if (key.equals(eventConfig.getString("streamName")))
+                        return collName;
+                    if (key.equals(eventConfig.getString("stream")))
+                        return collName;
+                    if (eventConfig.containsKey("streams")) {
+                        try {
+                            var list = eventConfig.get("streams", java.util.List.class);
+                            if (list != null && list.contains(key))
+                                return collName;
+                        } catch (Exception ignore) {}
+                    }
+                } catch (Exception e) {
+                    if (debugLog)
+                        logger.warn(CLASS_NAME + ".lookupCollectionInMongo: error reading collection " + collName + ": " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            if (debugLog)
+                logger.warn(CLASS_NAME + ".lookupCollectionInMongo: " + e.getMessage());
+        }
+
+        // Fallback: treat the stream name itself as the collection name
+        return key;
+    }
+
+    /**
+     * Derives the Captions DB name from the Events DB name.
+     * Throws IllegalStateException if the DB name cannot be resolved so callers
+     * get a clear error rather than a NullPointerException from getDatabase(null).
+     */
+    private String resolveCaptionsDbName() {
+        String eventsDbName = mongo.getDatabase() != null ? mongo.getDatabase().getName() : null;
+        if (eventsDbName == null)
+            throw new IllegalStateException(CLASS_NAME + ".resolveCaptionsDbName: mongo database is not available");
+        String customer = null;
+        if (eventsDbName.startsWith("Events_")) {
+            customer = eventsDbName.substring("Events_".length());
+        } else if (eventsDbName.startsWith("Customer_")) {
+            customer = eventsDbName.substring("Customer_".length());
+        }
+        return customer != null ? "Captions_" + customer : eventsDbName;
+    }
+
+    @Override
+    public long getStartOffset()
+    {
+        return delayedStream.getStartOffset();
+    }
+
+    @Override
+    public String getStreamName()
+    {
+        return delayedStream.getStreamName();
     }
 }

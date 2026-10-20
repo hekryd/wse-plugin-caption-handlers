@@ -22,7 +22,11 @@ public class DelayedStream
 {
     private static final Class<DelayedStream> CLASS = DelayedStream.class;
     private static final String CLASS_NAME = CLASS.getSimpleName();
-    public static final long DEFAULT_START_DELAY = 30000;
+
+    //ignore: whisper placeholder
+    public static long DEFAULT_START_DELAY = 30000;
+    //
+    
     private final IApplicationInstance appInstance;
     private final WMSLogger logger;
     private final String streamName;
@@ -37,6 +41,9 @@ public class DelayedStream
     private boolean isFirstAudio = true;
     private boolean isFirstVideo = true;
     private final Queue<AMFPacket> packets = new PriorityBlockingQueue<>(2400, new AMFPacketComparator());
+    // Packet publication and replacement must be atomic: an edit must not replace a
+    // packet that processPackets has already selected for publication.
+    private final Object packetLock = new Object();
     private volatile boolean doShutdown = false;
 
     public DelayedStream(IApplicationInstance appInstance, String streamName, ScheduledExecutorService executor)
@@ -46,9 +53,24 @@ public class DelayedStream
         this.debugLog = appInstance.getProperties().getPropertyBoolean(PROP_DELAYED_STREAM_DEBUG_LOG, debugLog);
         this.streamName = streamName;
         this.executor = executor;
+        // Prüfe, ob die Property 'added_stream_delay_in_ms' gesetzt ist
+        long delayInMs = appInstance.getProperties().getPropertyLong("added_stream_delay_in_ms", 0L);
+        logger.info(MODULE_NAME + "::" + CLASS_NAME + " [Init] added_stream_delay_in_ms=" + delayInMs);
         startTime = System.currentTimeMillis();
-        startDelay = appInstance.getProperties().getPropertyLong(PROP_CAPTIONS_STREAM_DELAY, DEFAULT_START_DELAY);
+        startDelay = delayInMs;
+        logger.info(MODULE_NAME + "::" + CLASS_NAME + " [Init] startDelay=" + startDelay + " ms");
         executor.scheduleAtFixedRate(() -> processPackets(), 0, 75, TimeUnit.MILLISECONDS);
+    }
+
+    public interface PublishListener {
+        void onDataPublished(long absTimecode, com.wowza.wms.amf.AMFPacket packet);
+    }
+
+    private PublishListener publishListener;
+
+    public void setPublishListener(PublishListener listener)
+    {
+        this.publishListener = listener;
     }
 
     public long getStartOffset()
@@ -58,19 +80,39 @@ public class DelayedStream
 
     public void writePacket(AMFPacket packet)
     {
-        if(doShutdown)
-            return;
-        packets.add(packet);
-        if (debugLog)
-            logger.info(MODULE_NAME + "::" + CLASS_NAME + ".writePacket() [" + appInstance.getContextStr() + "/" + streamName + "] packet: " + packet);
-        if (startOffset == -1)
-            startOffset = packet.getAbsTimecode();
+        synchronized (packetLock) {
+            if(doShutdown)
+                return;
+            packets.add(packet);
+            if (debugLog)
+                logger.info(MODULE_NAME + "::" + CLASS_NAME + ".writePacket() [" + appInstance.getContextStr() + "/" + streamName + "] packet: " + packet);
+            if (startOffset == -1)
+                startOffset = packet.getAbsTimecode();
+        }
+    }
+
+    /**
+     * Replaces a packet that has not yet been published. Returns false when the
+     * original packet has already left the delay queue and therefore cannot be
+     * changed in the live stream.
+     */
+    public boolean replacePendingPacket(AMFPacket originalPacket, AMFPacket replacementPacket)
+    {
+        synchronized (packetLock) {
+            if (doShutdown || !packets.remove(originalPacket))
+                return false;
+            packets.add(replacementPacket);
+            if (debugLog)
+                logger.info(MODULE_NAME + "::" + CLASS_NAME + ".replacePendingPacket() [" + appInstance.getContextStr() + "/" + streamName + "] packet: " + replacementPacket);
+            return true;
+        }
     }
 
     private void processPackets()
     {
-        try
-        {
+        synchronized (packetLock) {
+            try
+            {
             if(doShutdown && packets.isEmpty())
             {
                 executor.shutdown();
@@ -177,14 +219,22 @@ public class DelayedStream
                         if (debugLog)
                             logger.info(MODULE_NAME + "::" + CLASS_NAME + ".writePacket live: dat:" + timecode + ":" + packet.getSeq());
                         publisher.addDataData(packet.getData(), packet.getSize(), timecode);
+                        if (publishListener != null) {
+                            try {
+                                publishListener.onDataPublished(timecode, packet);
+                            } catch (Exception e) {
+                                logger.error(MODULE_NAME + "::" + CLASS_NAME + ".publishListener error", e);
+                            }
+                        }
                         break;
                 }
                 packets.remove(packet);
             }
-        }
-        catch (Exception e)
-        {
-            logger.error(MODULE_NAME + "::" + CLASS_NAME + ".writePacket[metadata] ", e);
+            }
+            catch (Exception e)
+            {
+                logger.error(MODULE_NAME + "::" + CLASS_NAME + ".writePacket[metadata] ", e);
+            }
         }
     }
 
@@ -208,6 +258,37 @@ public class DelayedStream
         return startTime;
     }
 
+    public long getPublishedStreamTimecode()
+    {
+        if (startOffset == -1)
+            return -1L;
+        long now = System.currentTimeMillis();
+        return now - startDelay - (startTime - startOffset);
+    }
+
+    /**
+     * Calculate the estimated wall-clock publish time (in ms since Unix epoch)
+     * for a packet with the given absolute timecode.
+     *
+     * Formula derived from the publish condition in processPackets():
+     * publishWallClock = startTime - startOffset + timecode + startDelay
+     */
+    public long estimatedPublishTimeMillis(long timecode)
+    {
+        return startTime - startOffset + timecode + startDelay;
+    }
+
+    /**
+     * Converts a wall-clock publish time from another Wowza server to this
+     * delayed stream's timecode. Both servers must use synchronized clocks.
+     * Returns -1 until this stream has received its first source packet.
+     */
+    public long timecodeForEstimatedPublishTimeMillis(long publishTimeMillis)
+    {
+        long offset = startOffset;
+        return offset == -1 ? -1 : publishTimeMillis - startTime + offset - startDelay;
+    }
+
     public long getFirstPacketTimecode()
     {
         return packets.stream()
@@ -220,5 +301,10 @@ public class DelayedStream
         return packets.stream()
                 .reduce((prev, next) -> next)
                 .map(AMFPacket::getAbsTimecode).orElse(-1L);
+    }
+
+    public String getStreamName()
+    {
+        return streamName;
     }
 }

@@ -5,7 +5,7 @@ services:
         image: wowza/wowza-streaming-engine:4.9.4-trial
         platform: linux/amd64
         environment:
-            - WSE_LICENSE_KEY=$WSE_LICENSE_KEY
+            - WSE_LICENSE_KEY=${WSE_LICENSE_KEY}
             - ADMIN_USER=admin
             - ADMIN_PASSWORD=password
             - IPWHITELIST=*
@@ -22,11 +22,14 @@ services:
             - ./conf:/usr/local/WowzaStreamingEngine/conf.addon
             - ./lib:/usr/local/WowzaStreamingEngine/lib.addon
         ports:
-            - 8087:8087
-            - 80:80
-            - 443:443
-            - 1935:1935
-            - 6970-6999:6970-6999/udp
+            - 80:80                     #HLS
+            - 443:443                   #SSL
+            - 554:554                   #RTSP
+            - 1935:1935                 #RTMP
+            - 8087:8087                 #REST API
+            - 8089:8089                 #REST API Documenation
+            - 6970-6999:6970-6999/udp   #WEBRTC
+            - 10000:10000/udp           #SRT
         depends_on:
             wowza_setup:
                 condition: service_completed_successfully

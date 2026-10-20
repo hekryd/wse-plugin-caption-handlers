@@ -17,6 +17,10 @@ Below are 4 quick steps to test captions using the OpenAI Whisper service.
 ```
 docker compose up
 ```
+  Launch the service with the preconfigured translate docker compose file
+  ```
+  docker compose -f docker-compose-translate.yaml up
+  ```
 3. Push a video to your Wowza Streaming Engine service with `rtmp://wse-demo.wowza.com/whisper/myStream` 
 
 > Example ffmpeg command:
@@ -34,6 +38,42 @@ https://www.wowza.com/testplayers?src=https://wse-demo.wowza.com/whisper/myStrea
 
 ## Configuration
 See the included Application.xml files for the module configurations.
+
+### Primary / backup caption servers
+
+Two Wowza servers can share captions for the same event. Configure the local role in
+`/usr/local/WowzaStreamingEngine/custom-plugin-resources/env.properties` on each host:
+
+```
+# wow-01
+wowza.serverRole=primary
+```
+
+```
+# wow-03
+wowza.serverRole=backup
+```
+
+`wowza.mainServer=true` on wow-01 and `false` on wow-03 remain supported for existing
+installations. Both hosts must use the same Events and Captions MongoDB databases and
+have synchronized system clocks.
+
+With `stream.backup` absent or `false` in an event document, wow-01 generates and
+stores captions while wow-03 reads the new records from MongoDB and displays them on
+its own delayed stream. Switch roles during a live stream by changing the event:
+
+```
+db.events.updateOne(
+  { eventKey: "<event-key>" },
+  { $set: { "stream.backup": true } }
+)
+```
+
+Set `stream.backup` back to `false` to return generation to wow-01. Each server checks
+this shared flag at most once per second; no application or stream restart is needed.
+The existing MongoDB change-stream requirement therefore applies to both caption editing
+and server-to-server caption delivery. Both servers keep their speech recognizer aligned
+with the live audio, but only the active server publishes caption records.
 
 ### Whisper
 To run whisper with GPU and docker compose, uncomment the following lines:

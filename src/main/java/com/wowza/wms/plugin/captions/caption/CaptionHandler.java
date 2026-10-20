@@ -14,4 +14,14 @@ public interface CaptionHandler
     void setWordsPerMinute(int wordsPerMinute);
 
     CaptionTiming getCaptionTiming();
+
+    default long getStartOffset()
+    {
+        return 0;
+    }
+
+    default String getStreamName()
+    {
+        return "unknown";
+    }
 }
